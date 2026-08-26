@@ -4248,3 +4248,18 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod clipboard_tests {
+    use super::base64_encode;
+
+    #[test]
+    fn base64_matches_rfc4648_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        assert_eq!(base64_encode("héllo\n".as_bytes()), "aMOpbGxvCg==");
+    }
+}
