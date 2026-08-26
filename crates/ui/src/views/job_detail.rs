@@ -30,16 +30,15 @@ pub fn render_job_detail_view(f: &mut Frame<'_>, app: &mut App, area: Rect) {
         return;
     };
     let workflow = &app.workflows[workflow_idx];
-    let Some(execution) = workflow.execution_details.as_ref() else {
-        return;
-    };
     let Some(job_idx) = app.job_list_state.selected() else {
         return;
     };
-    if job_idx >= execution.jobs.len() {
+    // The pane index is a job_names index — resolve the execution entry by
+    // name (execution.jobs is in execution order, not pane order; the helper
+    // also returns None while there is no execution yet).
+    let Some(job) = workflow.job_execution_at(job_idx) else {
         return;
-    }
-    let job = &execution.jobs[job_idx];
+    };
 
     let outer = Layout::default()
         .direction(Direction::Vertical)

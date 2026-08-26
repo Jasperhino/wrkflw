@@ -987,26 +987,28 @@ impl App {
             .filter(|&idx| idx < self.workflows.len());
 
         if let Some(workflow_idx) = current_workflow_idx {
-            if let Some(execution) = &self.workflows[workflow_idx].execution_details {
-                if execution.jobs.is_empty() {
-                    return;
-                }
-
-                let i = match self.job_list_state.selected() {
-                    Some(i) => {
-                        if i == 0 {
-                            execution.jobs.len() - 1
-                        } else {
-                            i - 1
-                        }
-                    }
-                    None => 0,
-                };
-                self.job_list_state.select(Some(i));
-
-                // Reset step selection when changing jobs
-                self.step_list_state.select(Some(0));
+            // Navigate over the PANE's rows (job_names) — `execution.jobs`
+            // only holds started jobs, in execution order, so its length and
+            // indices do not correspond to what the pane shows.
+            let len = self.workflows[workflow_idx].job_pane_len();
+            if len == 0 {
+                return;
             }
+
+            let i = match self.job_list_state.selected() {
+                Some(i) => {
+                    if i == 0 {
+                        len - 1
+                    } else {
+                        i - 1
+                    }
+                }
+                None => 0,
+            };
+            self.job_list_state.select(Some(i));
+
+            // Reset step selection when changing jobs
+            self.step_list_state.select(Some(0));
         }
     }
 
@@ -1018,26 +1020,26 @@ impl App {
             .filter(|&idx| idx < self.workflows.len());
 
         if let Some(workflow_idx) = current_workflow_idx {
-            if let Some(execution) = &self.workflows[workflow_idx].execution_details {
-                if execution.jobs.is_empty() {
-                    return;
-                }
-
-                let i = match self.job_list_state.selected() {
-                    Some(i) => {
-                        if i >= execution.jobs.len() - 1 {
-                            0
-                        } else {
-                            i + 1
-                        }
-                    }
-                    None => 0,
-                };
-                self.job_list_state.select(Some(i));
-
-                // Reset step selection when changing jobs
-                self.step_list_state.select(Some(0));
+            // See previous_job: pane rows, not execution.jobs.
+            let len = self.workflows[workflow_idx].job_pane_len();
+            if len == 0 {
+                return;
             }
+
+            let i = match self.job_list_state.selected() {
+                Some(i) => {
+                    if i >= len - 1 {
+                        0
+                    } else {
+                        i + 1
+                    }
+                }
+                None => 0,
+            };
+            self.job_list_state.select(Some(i));
+
+            // Reset step selection when changing jobs
+            self.step_list_state.select(Some(0));
         }
     }
 
@@ -1049,29 +1051,30 @@ impl App {
             .filter(|&idx| idx < self.workflows.len());
 
         if let Some(workflow_idx) = current_workflow_idx {
-            if let Some(execution) = &self.workflows[workflow_idx].execution_details {
-                if let Some(job_idx) = self.job_list_state.selected() {
-                    if job_idx < execution.jobs.len() {
-                        let steps = &execution.jobs[job_idx].steps;
-                        if steps.is_empty() {
-                            return;
-                        }
-
-                        let i = match self.step_list_state.selected() {
-                            Some(i) => {
-                                if i == 0 {
-                                    steps.len() - 1
-                                } else {
-                                    i - 1
-                                }
-                            }
-                            None => 0,
-                        };
-                        self.step_list_state.select(Some(i));
-                        // Update the table state to match
-                        self.step_table_state.select(Some(i));
-                    }
+            if let Some(job_idx) = self.job_list_state.selected() {
+                // The pane index names the job; resolve its execution entry
+                // by NAME (execution.jobs is in execution order).
+                let Some(job) = self.workflows[workflow_idx].job_execution_at(job_idx) else {
+                    return;
+                };
+                let steps = &job.steps;
+                if steps.is_empty() {
+                    return;
                 }
+
+                let i = match self.step_list_state.selected() {
+                    Some(i) => {
+                        if i == 0 {
+                            steps.len() - 1
+                        } else {
+                            i - 1
+                        }
+                    }
+                    None => 0,
+                };
+                self.step_list_state.select(Some(i));
+                // Update the table state to match
+                self.step_table_state.select(Some(i));
             }
         }
     }
@@ -1084,10 +1087,15 @@ impl App {
             .filter(|&idx| idx < self.workflows.len());
 
         if let Some(workflow_idx) = current_workflow_idx {
-            if let Some(execution) = &self.workflows[workflow_idx].execution_details {
+            {
                 if let Some(job_idx) = self.job_list_state.selected() {
-                    if job_idx < execution.jobs.len() {
-                        let steps = &execution.jobs[job_idx].steps;
+                    {
+                        // Resolve by name — see previous_step.
+                        let Some(job) = self.workflows[workflow_idx].job_execution_at(job_idx)
+                        else {
+                            return;
+                        };
+                        let steps = &job.steps;
                         if steps.is_empty() {
                             return;
                         }

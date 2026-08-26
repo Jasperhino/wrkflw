@@ -33,6 +33,38 @@ pub struct Workflow {
     pub definition: Option<Arc<WorkflowDefinition>>,
 }
 
+impl Workflow {
+    /// The execution entry for the job at `idx` in the jobs pane.
+    ///
+    /// The pane renders `job_names` (sorted at load time), while
+    /// `execution_details.jobs` is in EXECUTION order and only contains jobs
+    /// that have started — an index is not transferable between the two, so
+    /// resolve by name. Matrix jobs execute as expanded combinations named
+    /// `"<job> (<combo>)"`; when the template name has no exact entry, the
+    /// first combination stands in.
+    pub fn job_execution_at(&self, idx: usize) -> Option<&JobExecution> {
+        let name = self.job_names.get(idx)?;
+        let exec = self.execution_details.as_ref()?;
+        exec.jobs.iter().find(|j| &j.name == name).or_else(|| {
+            let prefix = format!("{} (", name);
+            exec.jobs.iter().find(|j| j.name.starts_with(&prefix))
+        })
+    }
+
+    /// Number of rows in the jobs pane. Falls back to the executed jobs when
+    /// the definition failed to parse and `job_names` is empty.
+    pub fn job_pane_len(&self) -> usize {
+        if !self.job_names.is_empty() {
+            self.job_names.len()
+        } else {
+            self.execution_details
+                .as_ref()
+                .map(|e| e.jobs.len())
+                .unwrap_or(0)
+        }
+    }
+}
+
 /// A workflow queued for execution, with its own target job
 pub struct QueuedExecution {
     pub workflow_idx: usize,
