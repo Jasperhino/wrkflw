@@ -1912,9 +1912,21 @@ async fn execute_job_with_matrix(
         ExecutionError::Execution(format!("Job '{}' not found in workflow", job_name))
     })?;
 
+    // Build the filtered needs context BEFORE the condition is evaluated —
+    // a job's `if:` routinely gates on an upstream job's output, and deciding
+    // to skip the job before that context exists makes every such gate false.
+    let (needs_ctx, needs_res) = build_needs_context(job, all_job_outputs, all_job_results);
+
     // Evaluate job condition if present
     if let Some(if_condition) = &job.if_condition {
-        let should_run = evaluate_job_condition(if_condition, env_context, user_env, workflow);
+        let should_run = evaluate_job_condition(
+            if_condition,
+            env_context,
+            user_env,
+            workflow,
+            &needs_ctx,
+            &needs_res,
+        );
         if !should_run {
             wrkflw_logging::info(&format!(
                 "{} Skipping job '{}' due to condition: {}",
@@ -1935,9 +1947,6 @@ async fn execute_job_with_matrix(
             }]);
         }
     }
-
-    // Build filtered needs context for this job (only jobs declared in `needs:`)
-    let (needs_ctx, needs_res) = build_needs_context(job, all_job_outputs, all_job_results);
 
     // Pre-resolve secrets once for this job (shared across matrix combinations and non-matrix path)
     let secrets_context: HashMap<String, String> = if let Some(secret_mgr) = secret_manager {
@@ -1971,17 +1980,15 @@ async fn execute_job_with_matrix(
                     .cloned()
                     .unwrap_or_else(|| ".".to_string()),
             );
-            let resolved =
-                crate::substitution::preprocess_expressions(expr, &workspace, &expr_ctx)
-                    .map_err(|e| {
-                        ExecutionError::Execution(format!(
-                            "Failed to resolve matrix expression for job '{}': {}",
-                            job_name, e
-                        ))
-                    })?;
-            let cfg = wrkflw_matrix::config_from_json(&resolved).map_err(|e| {
-                ExecutionError::Execution(format!("Job '{}': {}", job_name, e))
-            })?;
+            let resolved = crate::substitution::preprocess_expressions(expr, &workspace, &expr_ctx)
+                .map_err(|e| {
+                    ExecutionError::Execution(format!(
+                        "Failed to resolve matrix expression for job '{}': {}",
+                        job_name, e
+                    ))
+                })?;
+            let cfg = wrkflw_matrix::config_from_json(&resolved)
+                .map_err(|e| ExecutionError::Execution(format!("Job '{}': {}", job_name, e)))?;
             Some(cfg)
         } else {
             None
@@ -2084,6 +2091,15 @@ async fn execute_job(ctx: JobExecutionContext<'_>) -> Result<JobResult, Executio
     // mirrors only the user-declared slice for `toJSON(env)`.
     let mut job_env = ctx.env_context.clone();
     let mut job_user_env = ctx.user_env.clone();
+
+    // Isolate this job's GitHub env files from every other job in the run.
+    if let Err(e) = environment::scope_github_files_to_job(&mut job_env, ctx.job_name) {
+        wrkflw_logging::warning(&format!(
+            "Could not give job '{}' its own GitHub env files ({}) — \
+             concurrent jobs may clobber each other's $GITHUB_ENV",
+            ctx.job_name, e
+        ));
+    }
 
     // Add container-level environment variables (lowest precedence).
     // Container env is user-declared (jobs.<id>.container.env in YAML) — mirror
@@ -2356,6 +2372,15 @@ async fn execute_matrix_job(
     // they belong in job_env only, not user_env (they surface via `toJSON(matrix)`).
     let mut job_env = base_env_context.clone();
     let mut job_user_env = base_user_env.clone();
+
+    // Matrix combinations run concurrently too, so each needs its own files.
+    if let Err(e) = environment::scope_github_files_to_job(&mut job_env, &matrix_job_name) {
+        wrkflw_logging::warning(&format!(
+            "Could not give matrix job '{}' its own GitHub env files ({}) — \
+             concurrent jobs may clobber each other's $GITHUB_ENV",
+            matrix_job_name, e
+        ));
+    }
     environment::add_matrix_context(&mut job_env, combination);
 
     // Add container-level environment variables (lowest precedence). User-declared.
@@ -2429,11 +2454,10 @@ async fn execute_matrix_job(
     } else {
         // Execute each step
         // Determine runner image: prefer job container, then detect setup actions, fall back to runs-on
-        let runner_image_value =
-            upgrade_runner_image_for_microsandbox(
-                resolve_runner_image(job_template, &materialized_steps, runtime).await?,
-                &job_env,
-            );
+        let runner_image_value = upgrade_runner_image_for_microsandbox(
+            resolve_runner_image(job_template, &materialized_steps, runtime).await?,
+            &job_env,
+        );
 
         let mut all_steps_ok = true;
         let timeout_mins = sanitize_timeout_minutes(job_template.timeout_minutes, 360.0);
@@ -2887,11 +2911,7 @@ async fn run_step_with_guards(
     // env snapshot — this is the one choke point both the regular and
     // matrix step loops go through.
     let step_started = std::time::SystemTime::now();
-    let env_snapshot = snapshot_step_env(
-        job_env,
-        &step.env,
-        step_exec_ctx.services.secret_masker,
-    );
+    let env_snapshot = snapshot_step_env(job_env, &step.env, step_exec_ctx.services.secret_masker);
     let stamp = move |mut result: StepResult| -> StepResult {
         result.started_at = Some(step_started);
         result.finished_at = Some(std::time::SystemTime::now());
@@ -3474,11 +3494,7 @@ async fn execute_step(ctx: StepExecutionContext<'_>) -> Result<StepResult, Execu
                         }
                     }
                 }
-                format!(
-                    "Emulated checkout: cloned {} into {}",
-                    repo,
-                    dest.display()
-                )
+                format!("Emulated checkout: cloned {} into {}", repo, dest.display())
             } else {
                 // Same-repo checkout: copy the workflow's project tree, known
                 // from the workflow file's location (falls back to cwd).
@@ -4434,6 +4450,23 @@ async fn execute_node_action_on_host(
 
     let mut env: HashMap<String, String> = step_env.clone();
     env.extend(prepared.inputs.clone());
+    // The action runs in `ctx.working_dir` (see `current_dir` below), so
+    // GITHUB_WORKSPACE must name that directory: actions resolve their path
+    // inputs against the cwd but record them relative to the WORKSPACE, and
+    // when the two disagree the recorded paths escape it. That is how the
+    // cache action archived `dist/` as `../../../../<abs temp dir>/dist/...`
+    // and restored nothing into any later job.
+    //
+    // Canonicalized: on macOS the process reports its cwd as `/private/var/...`
+    // while this path is the `/var/...` symlink, and `path.relative()` between
+    // the two escapes to `/` and back.
+    env.insert(
+        "GITHUB_WORKSPACE".to_string(),
+        std::fs::canonicalize(ctx.working_dir)
+            .unwrap_or_else(|_| ctx.working_dir.to_path_buf())
+            .to_string_lossy()
+            .to_string(),
+    );
     // Toolchain actions expect the runner directories to exist.
     for (key, dir_name) in [
         ("RUNNER_TEMP", "wrkflw-runner-temp"),
@@ -4521,9 +4554,8 @@ async fn execute_node_action_in_container(
     let inputs_json = serde_json::to_string(&prepared.inputs).map_err(|e| {
         ExecutionError::Execution(format!("Failed to serialize action inputs: {}", e))
     })?;
-    std::fs::write(prepared.action_dir.join(".wrkflw-inputs.json"), inputs_json).map_err(
-        |e| ExecutionError::Execution(format!("Failed to write action inputs: {}", e)),
-    )?;
+    std::fs::write(prepared.action_dir.join(".wrkflw-inputs.json"), inputs_json)
+        .map_err(|e| ExecutionError::Execution(format!("Failed to write action inputs: {}", e)))?;
     let bootstrap = format!(
         r#"const path = require("path");
 const inputs = require(path.join(__dirname, ".wrkflw-inputs.json"));
@@ -4536,9 +4568,9 @@ import(require("url").pathToFileURL(main).href).catch((e) => {{
 "#,
         main = prepared.main_rel
     );
-    std::fs::write(prepared.action_dir.join(".wrkflw-bootstrap.cjs"), bootstrap).map_err(
-        |e| ExecutionError::Execution(format!("Failed to write action bootstrap: {}", e)),
-    )?;
+    std::fs::write(prepared.action_dir.join(".wrkflw-bootstrap.cjs"), bootstrap).map_err(|e| {
+        ExecutionError::Execution(format!("Failed to write action bootstrap: {}", e))
+    })?;
 
     // Full (non-slim) image: minimal variants lack shared libraries
     // GitHub runners always carry (pnpm's binary needs libatomic).
@@ -4553,10 +4585,7 @@ import(require("url").pathToFileURL(main).href).catch((e) => {{
         .to_string_lossy()
         .to_string();
     let cmd = ["node", bootstrap_in_container.as_str()];
-    let env_pairs: Vec<(&str, &str)> = env
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
+    let env_pairs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
 
     wrkflw_logging::info(&format!(
         "Executing Node action '{}@{}' in {}",
@@ -5029,6 +5058,10 @@ fn prepare_container_mounts(
             let runner_temp = run_root.join("runnertemp");
             let _ = std::fs::create_dir_all(&toolcache);
             let _ = std::fs::create_dir_all(&vm_home);
+            // buildx takes a lock under $HOME/.docker/buildx before it will
+            // build anything, and does not create the path itself — the VM's
+            // $HOME is this mount, which starts empty.
+            let _ = std::fs::create_dir_all(vm_home.join(".docker").join("buildx"));
             let _ = std::fs::create_dir_all(&runner_temp);
             owned_volume_paths.push((toolcache, PathBuf::from("/opt/hostedtoolcache")));
             owned_volume_paths.push((vm_home, PathBuf::from("/github/home")));
@@ -5048,16 +5081,18 @@ fn prepare_container_mounts(
             // actions work inside VMs. Off by default — the isolation
             // runtime should not silently hand host credentials to
             // untrusted workflows.
-            if std::env::var("WRKFLW_MOUNT_ADC").map(|v| v == "true").unwrap_or(false) {
+            if std::env::var("WRKFLW_MOUNT_ADC")
+                .map(|v| v == "true")
+                .unwrap_or(false)
+            {
                 let adc = std::env::var("GOOGLE_APPLICATION_CREDENTIALS")
                     .map(PathBuf::from)
                     .ok()
                     .filter(|p| p.exists())
                     .or_else(|| {
-                        dirs_home().map(|h| {
-                            h.join(".config/gcloud/application_default_credentials.json")
-                        })
-                        .filter(|p| p.exists())
+                        dirs_home()
+                            .map(|h| h.join(".config/gcloud/application_default_credentials.json"))
+                            .filter(|p| p.exists())
                     });
                 if let Some(adc_path) = adc {
                     owned_volume_paths
@@ -5967,6 +6002,8 @@ fn evaluate_job_condition(
     env_context: &HashMap<String, String>,
     user_env: &HashMap<String, String>,
     _workflow: &WorkflowDefinition,
+    needs_context: &HashMap<String, HashMap<String, String>>,
+    needs_results: &HashMap<String, String>,
 ) -> bool {
     let ctx = crate::expression::ExpressionContext {
         env_context,
@@ -5975,8 +6012,13 @@ fn evaluate_job_condition(
         step_statuses: &HashMap::new(),
         job_status: "success",
         secrets_context: &HashMap::new(),
-        needs_context: &HashMap::new(),
-        needs_results: &HashMap::new(),
+        // A job-level `if:` is the ONLY place `needs.*` decides whether a job
+        // runs at all. Evaluated against an empty context, every job gated on
+        // an upstream output was silently skipped — `needs.x.outputs.y ==
+        // 'true'` came out false while the very next step's expressions saw
+        // the value perfectly well.
+        needs_context,
+        needs_results,
         user_env,
     };
     evaluate_condition_with_context(condition, &ctx)
@@ -6635,11 +6677,64 @@ mod tests {
     }
 
     #[test]
+    fn job_condition_sees_needs_outputs() {
+        // A job-level `if:` gating on an upstream job's output is the whole
+        // point of `needs.*`; evaluated against an empty context every such
+        // job was silently skipped.
+        let env = HashMap::new();
+        let wf = empty_workflow();
+        let needs_outputs = HashMap::from([(
+            "resolve".to_string(),
+            HashMap::from([("has_rebuilds".to_string(), "true".to_string())]),
+        )]);
+        let needs_results = HashMap::from([("resolve".to_string(), "success".to_string())]);
+
+        assert!(evaluate_job_condition(
+            "needs.resolve.outputs.has_rebuilds == 'true'",
+            &env,
+            &env,
+            &wf,
+            &needs_outputs,
+            &needs_results,
+        ));
+        assert!(!evaluate_job_condition(
+            "needs.resolve.outputs.has_rebuilds == 'false'",
+            &env,
+            &env,
+            &wf,
+            &needs_outputs,
+            &needs_results,
+        ));
+        assert!(evaluate_job_condition(
+            "needs.resolve.result == 'success'",
+            &env,
+            &env,
+            &wf,
+            &needs_outputs,
+            &needs_results,
+        ));
+    }
+
+    #[test]
     fn condition_true_false_literals() {
         let env = HashMap::new();
         let wf = empty_workflow();
-        assert!(evaluate_job_condition("true", &env, &env, &wf));
-        assert!(!evaluate_job_condition("false", &env, &env, &wf));
+        assert!(evaluate_job_condition(
+            "true",
+            &env,
+            &env,
+            &wf,
+            &HashMap::new(),
+            &HashMap::new()
+        ));
+        assert!(!evaluate_job_condition(
+            "false",
+            &env,
+            &env,
+            &wf,
+            &HashMap::new(),
+            &HashMap::new()
+        ));
     }
 
     #[test]
@@ -6652,13 +6747,17 @@ mod tests {
             "steps.build.outcome == 'success'",
             &env,
             &env,
-            &wf
+            &wf,
+            &HashMap::new(),
+            &HashMap::new()
         ));
         assert!(!evaluate_job_condition(
             "steps.build.outcome == 'failure'",
             &env,
             &env,
-            &wf
+            &wf,
+            &HashMap::new(),
+            &HashMap::new()
         ));
     }
 
@@ -6666,28 +6765,56 @@ mod tests {
     fn condition_success_function_defaults_true() {
         let env = HashMap::new();
         let wf = empty_workflow();
-        assert!(evaluate_job_condition("success()", &env, &env, &wf));
+        assert!(evaluate_job_condition(
+            "success()",
+            &env,
+            &env,
+            &wf,
+            &HashMap::new(),
+            &HashMap::new()
+        ));
     }
 
     #[test]
     fn condition_failure_function_defaults_false() {
         let env = HashMap::new();
         let wf = empty_workflow();
-        assert!(!evaluate_job_condition("failure()", &env, &env, &wf));
+        assert!(!evaluate_job_condition(
+            "failure()",
+            &env,
+            &env,
+            &wf,
+            &HashMap::new(),
+            &HashMap::new()
+        ));
     }
 
     #[test]
     fn condition_always_function_defaults_true() {
         let env = HashMap::new();
         let wf = empty_workflow();
-        assert!(evaluate_job_condition("always()", &env, &env, &wf));
+        assert!(evaluate_job_condition(
+            "always()",
+            &env,
+            &env,
+            &wf,
+            &HashMap::new(),
+            &HashMap::new()
+        ));
     }
 
     #[test]
     fn condition_cancelled_function_defaults_false() {
         let env = HashMap::new();
         let wf = empty_workflow();
-        assert!(!evaluate_job_condition("cancelled()", &env, &env, &wf));
+        assert!(!evaluate_job_condition(
+            "cancelled()",
+            &env,
+            &env,
+            &wf,
+            &HashMap::new(),
+            &HashMap::new()
+        ));
     }
 
     #[test]
@@ -6699,7 +6826,9 @@ mod tests {
             "failure() || success()",
             &env,
             &env,
-            &wf
+            &wf,
+            &HashMap::new(),
+            &HashMap::new()
         ));
     }
 
@@ -6712,7 +6841,9 @@ mod tests {
             "failure() || cancelled()",
             &env,
             &env,
-            &wf
+            &wf,
+            &HashMap::new(),
+            &HashMap::new()
         ));
     }
 
@@ -6726,16 +6857,27 @@ mod tests {
             "always() && failure()",
             &env,
             &env,
-            &wf
+            &wf,
+            &HashMap::new(),
+            &HashMap::new()
         ));
         // always() alone → true
-        assert!(evaluate_job_condition("always()", &env, &env, &wf));
+        assert!(evaluate_job_condition(
+            "always()",
+            &env,
+            &env,
+            &wf,
+            &HashMap::new(),
+            &HashMap::new()
+        ));
         // always() || failure() → true (|| returns first truthy)
         assert!(evaluate_job_condition(
             "always() || failure()",
             &env,
             &env,
-            &wf
+            &wf,
+            &HashMap::new(),
+            &HashMap::new()
         ));
     }
 
@@ -6749,10 +6891,26 @@ mod tests {
             "&&& invalid syntax",
             &env,
             &env,
-            &wf
+            &wf,
+            &HashMap::new(),
+            &HashMap::new()
         ));
-        assert!(!evaluate_job_condition("== broken", &env, &env, &wf));
-        assert!(!evaluate_job_condition("((( unmatched", &env, &env, &wf));
+        assert!(!evaluate_job_condition(
+            "== broken",
+            &env,
+            &env,
+            &wf,
+            &HashMap::new(),
+            &HashMap::new()
+        ));
+        assert!(!evaluate_job_condition(
+            "((( unmatched",
+            &env,
+            &env,
+            &wf,
+            &HashMap::new(),
+            &HashMap::new()
+        ));
     }
 
     #[test]
@@ -6766,20 +6924,26 @@ mod tests {
             "env.MY_STEPS_COUNT == '5'",
             &env,
             &env,
-            &wf
+            &wf,
+            &HashMap::new(),
+            &HashMap::new()
         ));
         assert!(evaluate_job_condition(
             "env._STEPS_CHECK == 'ok'",
             &env,
             &env,
-            &wf
+            &wf,
+            &HashMap::new(),
+            &HashMap::new()
         ));
         // Missing env var → null, null != '5' → false
         assert!(!evaluate_job_condition(
             "env.MISSING_VAR == '5'",
             &env,
             &env,
-            &wf
+            &wf,
+            &HashMap::new(),
+            &HashMap::new()
         ));
     }
 

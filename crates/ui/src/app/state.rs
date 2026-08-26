@@ -67,7 +67,11 @@ pub(crate) fn base64_encode(data: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
         out.push(TABLE[(n >> 18) as usize & 63] as char);
         out.push(TABLE[(n >> 12) as usize & 63] as char);
@@ -136,15 +140,15 @@ pub struct App {
     /// (installed by `start_next_workflow_execution`, dropped when the
     /// final result arrives — finals are authoritative).
     pub progress_rx: Option<tokio::sync::mpsc::UnboundedReceiver<wrkflw_executor::ProgressEvent>>,
-    pub job_list_state: ListState, // For viewing job details
-    pub detailed_view: bool, // Whether we're in detailed view mode
-    pub step_list_state: ListState, // For selecting steps in detailed view
-    pub step_table_state: TableState, // For the steps table in detailed view
-    pub last_tick: Instant, // For UI animations and updates
-    pub tick_rate: Duration, // How often to update the UI
-    pub spinner_frame: usize, // Current spinner animation frame
+    pub job_list_state: ListState,            // For viewing job details
+    pub detailed_view: bool,                  // Whether we're in detailed view mode
+    pub step_list_state: ListState,           // For selecting steps in detailed view
+    pub step_table_state: TableState,         // For the steps table in detailed view
+    pub last_tick: Instant,                   // For UI animations and updates
+    pub tick_rate: Duration,                  // How often to update the UI
+    pub spinner_frame: usize,                 // Current spinner animation frame
     pub tx: mpsc::Sender<ExecutionResultMsg>, // Channel for async communication
-    pub status_message: Option<String>, // Temporary status message to display
+    pub status_message: Option<String>,       // Temporary status message to display
     pub status_message_severity: StatusSeverity, // Severity of the current status message
     pub status_message_time: Option<Instant>, // When the message was set
 
@@ -580,9 +584,7 @@ impl App {
                 if wrkflw_executor::microsandbox::MicrosandboxRuntime::is_available() {
                     RuntimeType::Microsandbox
                 } else {
-                    wrkflw_logging::warning(
-                        "msb not found — falling back to emulation mode",
-                    );
+                    wrkflw_logging::warning("msb not found — falling back to emulation mode");
                     RuntimeType::Emulation
                 }
             }
@@ -1071,7 +1073,9 @@ impl App {
 
     /// Whether host ADC mounting into microVMs is currently enabled.
     pub fn adc_mount_enabled(&self) -> bool {
-        std::env::var("WRKFLW_MOUNT_ADC").map(|v| v == "true").unwrap_or(false)
+        std::env::var("WRKFLW_MOUNT_ADC")
+            .map(|v| v == "true")
+            .unwrap_or(false)
     }
 
     /// Toggle mounting the host's Application Default Credentials into

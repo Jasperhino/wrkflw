@@ -701,8 +701,8 @@ pub fn start_next_workflow_execution(
                     // parking a worker thread on a non-tokio executor — tokio-
                     // driven futures (process waits, timers) could then stall
                     // forever, which froze the TUI mid-run.
-                    let _stderr_guard = wrkflw_utils::fd::RedirectedStderr::to_null()
-                        .map_err(|e| {
+                    let _stderr_guard =
+                        wrkflw_utils::fd::RedirectedStderr::to_null().map_err(|e| {
                             format!("Failed to redirect stderr during execution: {}", e)
                         })?;
 

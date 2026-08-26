@@ -148,7 +148,12 @@ pub fn render_help_content(f: &mut Frame<'_>, area: Rect, scroll_offset: usize) 
         ),
         (2, "Execution", COLORS.success, "Monitor job progress"),
         (3, "DAG", COLORS.info, "Dependency graph / topological list"),
-        (4, "Gantt", COLORS.success, "Job & step timeline with durations"),
+        (
+            4,
+            "Gantt",
+            COLORS.success,
+            "Job & step timeline with durations",
+        ),
         (5, "Logs", COLORS.info, "Execution logs · search · filter"),
         (
             6,

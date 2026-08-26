@@ -275,6 +275,29 @@ impl ContainerRuntime for EmulationRuntime {
             }
         }
 
+        // The step runs in `actual_working_dir`, so GITHUB_WORKSPACE has to
+        // name that same directory — in emulation the caller's value still
+        // points at the container-visible path or the project root, and the
+        // two disagree.
+        //
+        // Anything that records paths relative to the workspace then records
+        // nonsense. The cache action archived `dist/` as
+        // `../../../../private/var/.../.tmpXXXX/dist/...`: entries that escape
+        // upward out of the workspace and resolve back into ONE step's scratch
+        // directory, so every later job restored them into a directory it does
+        // not use and saw an empty tree.
+        //
+        // Canonicalized, because on macOS the shell reports a cwd of
+        // `/private/var/...` while the path handed around here is the
+        // `/var/...` symlink. Same directory, different text — and
+        // `path.relative()` between the two walks all the way up to `/` and
+        // back down, which is what produced those escaping entries.
+        if !matches!(cmd_basename, "cargo" | "rustup") {
+            let workspace = fs::canonicalize(&actual_working_dir)
+                .unwrap_or_else(|_| actual_working_dir.clone());
+            cmd.env("GITHUB_WORKSPACE", &workspace);
+        }
+
         match cmd.output() {
             Ok(output_result) => {
                 let exit_code = output_result.status.code().unwrap_or(-1);

@@ -10,9 +10,7 @@ pub fn validate_matrix(matrix: &Value, result: &mut ValidationResult) {
         if trimmed.starts_with("${{") && trimmed.ends_with("}}") {
             return;
         }
-        result.add_issue(
-            "Matrix must be a mapping or a ${{ ... }} expression".to_string(),
-        );
+        result.add_issue("Matrix must be a mapping or a ${{ ... }} expression".to_string());
         return;
     }
 

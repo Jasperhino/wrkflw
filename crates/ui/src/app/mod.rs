@@ -249,12 +249,18 @@ fn run_tui_event_loop(
                 let copy_target = |zones: &Z| -> Option<(crate::app::CopyPane, usize)> {
                     if let Some((r, offset)) = zones.logs_window {
                         if Z::hit(r, col, row) {
-                            return Some((crate::app::CopyPane::Logs, offset + (row - r.y) as usize));
+                            return Some((
+                                crate::app::CopyPane::Logs,
+                                offset + (row - r.y) as usize,
+                            ));
                         }
                     }
                     if let Some((r, start)) = zones.live_window {
                         if Z::hit(r, col, row) {
-                            return Some((crate::app::CopyPane::Live, start + (row - r.y) as usize));
+                            return Some((
+                                crate::app::CopyPane::Live,
+                                start + (row - r.y) as usize,
+                            ));
                         }
                     }
                     if let Some((r, start)) = zones.step_output_window {

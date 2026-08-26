@@ -290,7 +290,10 @@ fn render_graph(
                 lines.push(Line::from(vec![
                     Span::styled(format!("{} ", side), Style::default().fg(frame_color)),
                     theme::badge_outline(format!("matrix×{}", matrix_axes), BadgeKind::Info),
-                    Span::styled(format!("         {}", side), Style::default().fg(frame_color)),
+                    Span::styled(
+                        format!("         {}", side),
+                        Style::default().fg(frame_color),
+                    ),
                 ]));
             }
             lines.push(Line::from(vec![Span::styled(

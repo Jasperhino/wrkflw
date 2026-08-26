@@ -142,7 +142,14 @@ jobs:
     // Turn the fixture project into a real git repo with one commit.
     for args in [
         vec!["init", "-q"],
-        vec!["-c", "user.email=lab@test", "-c", "user.name=lab", "add", "."],
+        vec![
+            "-c",
+            "user.email=lab@test",
+            "-c",
+            "user.name=lab",
+            "add",
+            ".",
+        ],
         vec![
             "-c",
             "user.email=lab@test",

@@ -404,10 +404,7 @@ mod ansi_tests {
 
     #[test]
     fn strips_mouse_report_fragments_and_controls() {
-        assert_eq!(
-            LogProcessor::strip_ansi("a\x1b[<5;75;34Mb\rc"),
-            "abc"
-        );
+        assert_eq!(LogProcessor::strip_ansi("a\x1b[<5;75;34Mb\rc"), "abc");
     }
 
     #[test]

@@ -126,9 +126,7 @@ impl ContainerRuntime for MicrosandboxRuntime {
             .stdin(std::process::Stdio::null())
             .output()
             .await
-            .map_err(|e| {
-                ContainerError::ContainerStart(format!("Failed to execute msb: {}", e))
-            })?;
+            .map_err(|e| ContainerError::ContainerStart(format!("Failed to execute msb: {}", e)))?;
 
         Ok(ContainerOutput {
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),

@@ -25,6 +25,56 @@ pub fn setup_github_environment_files(workspace_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Give one job its own GitHub env files.
+///
+/// GITHUB_ENV/GITHUB_OUTPUT/GITHUB_PATH are read back and then TRUNCATED at
+/// every step boundary (`github_env_files::clear_step_files`). One shared set
+/// per run therefore means two concurrent jobs truncate each other's pending
+/// writes: a variable a step exported with `>> $GITHUB_ENV` intermittently
+/// vanishes before the next step of its OWN job reads it, and the job silently
+/// falls back to the workflow-level value. GitHub gives every job its own
+/// runner; give every job its own files.
+///
+/// Nested one level under the existing `github/` directory so that anything
+/// deriving a run root from the env-file path (the microsandbox mounts) still
+/// lands on a directory shared by the whole run.
+pub fn scope_github_files_to_job(
+    env: &mut HashMap<String, String>,
+    job_key: &str,
+) -> io::Result<()> {
+    let Some(github_dir) = env
+        .get("GITHUB_ENV")
+        .map(Path::new)
+        .and_then(|p| p.parent())
+        .map(Path::to_path_buf)
+    else {
+        return Ok(());
+    };
+
+    let slug: String = job_key
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let job_dir = github_dir.join(if slug.is_empty() {
+        "job"
+    } else {
+        slug.as_str()
+    });
+    fs::create_dir_all(&job_dir)?;
+
+    for (key, filename) in [
+        ("GITHUB_OUTPUT", "output"),
+        ("GITHUB_ENV", "env"),
+        ("GITHUB_PATH", "path"),
+        ("GITHUB_STEP_SUMMARY", "step_summary"),
+    ] {
+        let path = job_dir.join(filename);
+        fs::write(&path, "")?;
+        env.insert(key.to_string(), path.to_string_lossy().to_string());
+    }
+    Ok(())
+}
+
 pub fn create_github_context(
     workflow: &WorkflowDefinition,
     workspace_dir: &Path,

@@ -92,13 +92,22 @@ pub fn render_gantt_tab(f: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
     }
     let (Some(&t0), Some(&t1)) = (starts.iter().min(), ends.iter().max()) else {
-        render_message(f, inner, "this run carries no timing data (re-run to capture it)");
+        render_message(
+            f,
+            inner,
+            "this run carries no timing data (re-run to capture it)",
+        );
         return;
     };
-    let total_ms = t1.duration_since(t0).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let total_ms = t1
+        .duration_since(t0)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
 
     let ms_from_t0 = |t: SystemTime| -> u64 {
-        t.duration_since(t0).map(|d| d.as_millis() as u64).unwrap_or(0)
+        t.duration_since(t0)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
     };
 
     // ── Rows ──────────────────────────────────────────────────────
@@ -193,7 +202,11 @@ pub fn render_gantt_tab(f: &mut Frame<'_>, app: &mut App, area: Rect) {
     ];
     if let Some((name, d)) = longest {
         summary.push(Span::styled(
-            format!("  ·  longest job: {} ({})", name, fmt_ms(d.as_millis() as u64)),
+            format!(
+                "  ·  longest job: {} ({})",
+                name,
+                fmt_ms(d.as_millis() as u64)
+            ),
             Style::default().fg(COLORS.text_dim),
         ));
     }
@@ -288,10 +301,7 @@ fn row_line(
     match row.span_ms {
         Some((start, end)) => {
             let (offset, len) = bar_cells(start, end, total_ms, chart_w);
-            spans.push(Span::styled(
-                " ".repeat(offset),
-                Style::default(),
-            ));
+            spans.push(Span::styled(" ".repeat(offset), Style::default()));
             spans.push(Span::styled(
                 bar_char.to_string().repeat(len),
                 Style::default().fg(row.color),
@@ -374,7 +384,11 @@ fn duration_label(start: Option<SystemTime>, end: Option<SystemTime>, now: Syste
     match start {
         Some(s) => {
             let e = end.unwrap_or(now);
-            fmt_ms(e.duration_since(s).map(|d| d.as_millis() as u64).unwrap_or(0))
+            fmt_ms(
+                e.duration_since(s)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+            )
         }
         None => "—".to_string(),
     }

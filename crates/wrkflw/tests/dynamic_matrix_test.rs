@@ -130,7 +130,9 @@ jobs:
         Err(_) => {}
         Ok(res) => {
             assert!(
-                res.jobs.iter().all(|j| !format!("{:?}", j.status).contains("Success")),
+                res.jobs
+                    .iter()
+                    .all(|j| !format!("{:?}", j.status).contains("Success")),
                 "an unresolvable matrix expression must not yield successful jobs"
             );
         }
