@@ -725,6 +725,16 @@ pub struct StepResult {
     pub started_at: Option<std::time::SystemTime>,
     /// Wall-clock end, stamped alongside `started_at`.
     pub finished_at: Option<std::time::SystemTime>,
+    /// Environment visible to the step (job env ⊕ step-level `env:`),
+    /// values secret-masked, sorted by key. Empty when not captured
+    /// (synthetic results).
+    pub env: Vec<(String, String)>,
+    /// `$GITHUB_OUTPUT` writes this step made, secret-masked, sorted.
+    pub outputs: Vec<(String, String)>,
+    /// `$GITHUB_ENV` writes this step made, secret-masked, sorted.
+    pub env_writes: Vec<(String, String)>,
+    /// `$GITHUB_PATH` additions this step made, in file order.
+    pub path_writes: Vec<String>,
 }
 
 impl StepResult {
@@ -738,6 +748,10 @@ impl StepResult {
             output,
             started_at: None,
             finished_at: None,
+            env: Vec::new(),
+            outputs: Vec::new(),
+            env_writes: Vec::new(),
+            path_writes: Vec::new(),
         }
     }
 }
@@ -2682,12 +2696,19 @@ impl StepLoopState {
 
                 self.step_results.push(result);
 
-                crate::github_env_files::apply_step_environment_updates(
+                let updates = crate::github_env_files::apply_step_environment_updates(
                     job_env,
                     job_user_env,
                     &mut self.step_outputs_map,
                     step.id.as_deref(),
                 );
+                // Attach what the step wrote to its result so per-step file
+                // activity ($GITHUB_OUTPUT/ENV/PATH) is inspectable later.
+                if let Some(last) = self.step_results.last_mut() {
+                    last.outputs = masked_sorted_kv(&updates.outputs, secret_masker);
+                    last.env_writes = masked_sorted_kv(&updates.env_vars, secret_masker);
+                    last.path_writes = updates.path_entries;
+                }
 
                 abort_job
             }
@@ -2798,6 +2819,61 @@ fn step_display_name(step: &Step, idx: usize) -> String {
         .unwrap_or_else(|| format!("Step {}", idx + 1))
 }
 
+/// Names whose values are masked in captured env/output snapshots even when
+/// no `SecretMasker` knows them (ambient tokens the user never declared).
+fn is_sensitive_env_key(key: &str) -> bool {
+    let upper = key.to_uppercase();
+    upper.ends_with("_TOKEN")
+        || upper.ends_with("_KEY")
+        || upper.ends_with("_PASSWORD")
+        || upper.contains("SECRET")
+        || upper == "GITHUB_TOKEN"
+}
+
+/// Mask a captured value: the masker redacts known secrets anywhere in the
+/// string; sensitive key names are blanked entirely as a second net.
+fn mask_captured_value(key: &str, value: &str, masker: Option<&SecretMasker>) -> String {
+    if is_sensitive_env_key(key) && !value.is_empty() {
+        return "***".to_string();
+    }
+    match masker {
+        Some(m) => m.mask(value),
+        None => value.to_string(),
+    }
+}
+
+/// Snapshot of the environment a step sees: the job env with the step's own
+/// `env:` overrides on top, values masked, sorted by key for stable display.
+fn snapshot_step_env(
+    job_env: &HashMap<String, String>,
+    step_env: &HashMap<String, String>,
+    masker: Option<&SecretMasker>,
+) -> Vec<(String, String)> {
+    let mut merged: HashMap<&String, &String> = job_env.iter().collect();
+    for (k, v) in step_env {
+        merged.insert(k, v);
+    }
+    let mut out: Vec<(String, String)> = merged
+        .into_iter()
+        .map(|(k, v)| (k.clone(), mask_captured_value(k, v, masker)))
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// Mask + sort a captured key/value map for display on a `StepResult`.
+fn masked_sorted_kv(
+    map: &HashMap<String, String>,
+    masker: Option<&SecretMasker>,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = map
+        .iter()
+        .map(|(k, v)| (k.clone(), mask_captured_value(k, v, masker)))
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 /// Run a step with if-condition and continue-on-error guards.
 /// Returns the step result and whether the job should be aborted.
 async fn run_step_with_guards(
@@ -2807,12 +2883,19 @@ async fn run_step_with_guards(
     workflow: &WorkflowDefinition,
     step_exec_ctx: StepExecutionContext<'_>,
 ) -> Result<StepOutcome, ExecutionError> {
-    // Every result leaving this wrapper carries wall-clock timing — this is
-    // the one choke point both the regular and matrix step loops go through.
+    // Every result leaving this wrapper carries wall-clock timing and the
+    // env snapshot — this is the one choke point both the regular and
+    // matrix step loops go through.
     let step_started = std::time::SystemTime::now();
-    let stamp = |mut result: StepResult| -> StepResult {
+    let env_snapshot = snapshot_step_env(
+        job_env,
+        &step.env,
+        step_exec_ctx.services.secret_masker,
+    );
+    let stamp = move |mut result: StepResult| -> StepResult {
         result.started_at = Some(step_started);
         result.finished_at = Some(std::time::SystemTime::now());
+        result.env = env_snapshot.clone();
         result
     };
     let step_name = step_display_name(step, step_idx);
@@ -2897,13 +2980,8 @@ async fn run_step_with_guards(
             };
             Ok(StepOutcome::Completed {
                 result: stamp(StepResult {
-                    name: step_name,
-                    status: StepStatus::Failure,
-                    output: format!("Error: {}", e),
-                    outcome: StepStatus::Failure,
                     conclusion,
-                    started_at: None,
-                    finished_at: None,
+                    ..StepResult::new(step_name, StepStatus::Failure, format!("Error: {}", e))
                 }),
                 abort_job,
             })
@@ -8500,13 +8578,8 @@ runs:
         let mut status = "success".to_string();
 
         let result = StepResult {
-            name: "build".to_string(),
-            status: StepStatus::Failure,
-            output: String::new(),
-            outcome: StepStatus::Failure,
             conclusion: StepStatus::Success, // continue-on-error
-            started_at: None,
-            finished_at: None,
+            ..StepResult::new("build".to_string(), StepStatus::Failure, String::new())
         };
         record_step_status(Some("build"), &result, &mut map, &mut status);
 
@@ -9214,13 +9287,8 @@ runs:
 
         // Simulate a step that failed but had continue-on-error
         let result = StepResult {
-            name: "lint".to_string(),
-            status: StepStatus::Failure,
-            output: String::new(),
-            outcome: StepStatus::Failure,
             conclusion: StepStatus::Success,
-            started_at: None,
-            finished_at: None,
+            ..StepResult::new("lint".to_string(), StepStatus::Failure, String::new())
         };
         record_step_status(Some("lint"), &result, &mut step_statuses, &mut job_status);
 

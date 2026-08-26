@@ -119,6 +119,9 @@ pub struct App {
     pub drag_copy: Option<(CopyPane, usize, usize)>,
     /// Step-inspector stdout scroll, in wrapped lines from the top.
     pub step_output_scroll: usize,
+    /// Whether the step inspector's Output pane shows the resolved command
+    /// above the output (toggled with `c`).
+    pub step_show_command: bool,
     /// Gantt tab vertical scroll, in rows from the top (clamped at render).
     pub gantt_scroll: usize,
     /// Gantt tab row cursor (index into the flattened job/step rows).
@@ -607,6 +610,7 @@ impl App {
             mouse_zones: std::cell::RefCell::new(MouseZones::default()),
             drag_copy: None,
             step_output_scroll: 0,
+            step_show_command: true,
             gantt_scroll: 0,
             gantt_selected: 0,
             gantt_follow: false,
@@ -1551,6 +1555,10 @@ impl App {
                                     output: step_result.output.clone(),
                                     started_at: step_result.started_at,
                                     finished_at: step_result.finished_at,
+                                    env: step_result.env.clone(),
+                                    outputs: step_result.outputs.clone(),
+                                    env_writes: step_result.env_writes.clone(),
+                                    path_writes: step_result.path_writes.clone(),
                                 })
                                 .collect::<Vec<StepExecution>>(),
                             logs: vec![job_result.logs.clone()],
@@ -1576,6 +1584,10 @@ impl App {
                             output: format!("Error: {}\n\nThis error prevented the workflow from executing properly.", e),
                             started_at: None,
                             finished_at: None,
+                            env: Vec::new(),
+                            outputs: Vec::new(),
+                            env_writes: Vec::new(),
+                            path_writes: Vec::new(),
                         }],
                         logs: vec![format!("Workflow execution error: {}", e)],
                         started_at: None,
@@ -1983,6 +1995,10 @@ impl App {
                     output: String::new(),
                     started_at: Some(at),
                     finished_at: None,
+                    env: Vec::new(),
+                    outputs: Vec::new(),
+                    env_writes: Vec::new(),
+                    path_writes: Vec::new(),
                 });
             }
             PE::StepFinished {
@@ -2011,6 +2027,10 @@ impl App {
                         output,
                         started_at: None,
                         finished_at: Some(at),
+                        env: Vec::new(),
+                        outputs: Vec::new(),
+                        env_writes: Vec::new(),
+                        path_writes: Vec::new(),
                     });
                 }
             }

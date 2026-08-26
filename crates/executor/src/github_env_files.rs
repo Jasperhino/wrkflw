@@ -142,17 +142,20 @@ pub fn read_step_environment_updates(job_env: &HashMap<String, String>) -> StepE
 /// - Merges GITHUB_ENV entries into `job_env`
 /// - Prepends GITHUB_PATH entries to the PATH in `job_env`
 /// - Clears per-step files so the next step starts fresh
+///
+/// Returns the updates that were applied so callers can attach them to the
+/// step's result (the Files view in the TUI renders them per step).
 pub fn apply_step_environment_updates(
     job_env: &mut HashMap<String, String>,
     job_user_env: &mut HashMap<String, String>,
     step_outputs_map: &mut HashMap<String, HashMap<String, String>>,
     step_id: Option<&str>,
-) {
+) -> StepEnvironmentUpdates {
     let updates = read_step_environment_updates(job_env);
 
     // Store step outputs keyed by step ID for ${{ steps.<id>.outputs.<key> }}
     if let Some(id) = step_id {
-        step_outputs_map.insert(id.to_string(), updates.outputs);
+        step_outputs_map.insert(id.to_string(), updates.outputs.clone());
     }
 
     // Merge GITHUB_ENV entries into job_env for subsequent steps.
@@ -160,9 +163,9 @@ pub fn apply_step_environment_updates(
     // `echo KEY=VAL >> $GITHUB_ENV`), so mirror into job_user_env too.
     // GITHUB_PATH updates below modify PATH in job_env only — PATH is not
     // a user-declared env var and must not leak into toJSON(env).
-    for (k, v) in updates.env_vars {
+    for (k, v) in &updates.env_vars {
         job_user_env.insert(k.clone(), v.clone());
-        job_env.insert(k, v);
+        job_env.insert(k.clone(), v.clone());
     }
 
     // Prepend GITHUB_PATH entries to PATH for subsequent steps
@@ -183,6 +186,8 @@ pub fn apply_step_environment_updates(
 
     // Clear files so the next step doesn't re-process these entries
     clear_step_files(job_env);
+
+    updates
 }
 
 /// Truncate environment files between steps.

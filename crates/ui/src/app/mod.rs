@@ -503,6 +503,7 @@ fn run_tui_event_loop(
                         // elsewhere it cycles top-level tabs.
                         if app.selected_tab == TAB_EXECUTION && app.detailed_view {
                             app.step_inspector_tab = (app.step_inspector_tab + 1) % 5;
+                            app.step_output_scroll = 0;
                         } else if app.selected_tab == TAB_TRIGGER {
                             // In the Trigger tab Tab cycles inputs/fields.
                             app.trigger_tab_next_field();
@@ -513,6 +514,7 @@ fn run_tui_event_loop(
                     KeyCode::BackTab => {
                         if app.selected_tab == TAB_EXECUTION && app.detailed_view {
                             app.step_inspector_tab = (app.step_inspector_tab + 4) % 5;
+                            app.step_output_scroll = 0;
                         } else if app.selected_tab == TAB_TRIGGER {
                             app.trigger_tab_prev_field();
                         } else {
@@ -881,7 +883,11 @@ fn run_tui_event_loop(
                         }
                     }
                     KeyCode::Char('c') => {
-                        if app.selected_tab == TAB_LOGS {
+                        if app.selected_tab == TAB_EXECUTION && app.detailed_view {
+                            // Step inspector: toggle the command line above
+                            // the step output (show output only, or both).
+                            app.step_show_command = !app.step_show_command;
+                        } else if app.selected_tab == TAB_LOGS {
                             app.clear_log_search_and_filter();
                         } else if app.selected_tab == TAB_TRIGGER {
                             // Trigger tab: copy curl preview into the

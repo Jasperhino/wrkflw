@@ -457,6 +457,10 @@ pub async fn execute_curl_trigger(
             conclusion: wrkflw_executor::StepStatus::Success,
             started_at: None,
             finished_at: None,
+            env: Vec::new(),
+            outputs: Vec::new(),
+            env_writes: Vec::new(),
+            path_writes: Vec::new(),
         }],
         logs: "Workflow triggered remotely on GitHub".to_string(),
         outputs: std::collections::HashMap::new(),
@@ -657,6 +661,10 @@ pub fn start_next_workflow_execution(
                                         output: validation_result.issues.join("\n"),
                                         started_at: None,
                                         finished_at: None,
+                                        env: Vec::new(),
+                                        outputs: Vec::new(),
+                                        env_writes: Vec::new(),
+                                        path_writes: Vec::new(),
                                     }
                                 }],
                                 logs: format!(

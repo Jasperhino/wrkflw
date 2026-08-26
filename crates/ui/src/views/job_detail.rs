@@ -2,9 +2,10 @@
 //
 // Mirrors `StepDetailScreen` from screens-core.jsx of the design handoff:
 // breadcrumb header, sub-tabs for Output / Env / Files / Matrix / Timeline.
-// Env/Files don't have backing data today so we render honest placeholders;
-// Output reuses each step's stdout, Matrix reads `Job.strategy`, and Timeline
-// reuses the timing chart with one row per step.
+// Output renders the step's command + stdout/stderr as separate styled
+// sections (`c` toggles the command); Env shows the masked environment the
+// step saw; Files shows its $GITHUB_OUTPUT/ENV/PATH writes; Matrix reads
+// `Job.strategy`; Timeline reuses the timing chart with one row per step.
 
 use crate::app::App;
 use crate::components::timing::{self, TimingRow};
@@ -60,8 +61,8 @@ pub fn render_job_detail_view(f: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     match app.step_inspector_tab {
         0 => render_output_pane(f, app, job, selected_step_idx, outer[2]),
-        1 => render_env_pane(f, outer[2]),
-        2 => render_files_pane(f, outer[2]),
+        1 => render_env_pane(f, app, job, selected_step_idx, outer[2]),
+        2 => render_files_pane(f, app, job, selected_step_idx, outer[2]),
         3 => render_matrix_pane(f, workflow, &job.name, outer[2]),
         4 => render_timeline_pane(f, job, outer[2]),
         _ => {}
@@ -216,6 +217,73 @@ fn render_steps_list(
     f.render_widget(Paragraph::new(lines), inner_area);
 }
 
+/// The executor formats run-step output as
+/// `Command: <cmd>\n\nStandard Output:\n…\nStandard Error:\n…` — parse it
+/// back into sections so they can be rendered (and toggled) separately.
+/// Output that doesn't match the format lands whole in `stdout`.
+struct ParsedStepOutput {
+    command: Option<String>,
+    stdout: String,
+    stderr: String,
+}
+
+fn parse_step_output(raw: &str) -> ParsedStepOutput {
+    enum S {
+        Cmd,
+        Out,
+        Err,
+    }
+    let mut command: Option<String> = None;
+    let mut stdout: Vec<&str> = Vec::new();
+    let mut stderr: Vec<&str> = Vec::new();
+    let mut state = S::Out;
+    for (i, line) in raw.split('\n').enumerate() {
+        if i == 0 {
+            if let Some(rest) = line.strip_prefix("Command: ") {
+                command = Some(rest.to_string());
+                state = S::Cmd;
+                continue;
+            }
+        }
+        match line {
+            "Standard Output:" => {
+                state = S::Out;
+                continue;
+            }
+            "Standard Error:" => {
+                state = S::Err;
+                continue;
+            }
+            _ => {}
+        }
+        match state {
+            // A multi-line `run:` block continues until the first blank
+            // line (the executor writes "\n\n" after the command).
+            S::Cmd => {
+                if line.is_empty() {
+                    state = S::Out;
+                } else if let Some(c) = command.as_mut() {
+                    c.push('\n');
+                    c.push_str(line);
+                }
+            }
+            S::Out => stdout.push(line),
+            S::Err => stderr.push(line),
+        }
+    }
+    let join_trimmed = |mut v: Vec<&str>| -> String {
+        while v.last() == Some(&"") {
+            v.pop();
+        }
+        v.join("\n")
+    };
+    ParsedStepOutput {
+        command,
+        stdout: join_trimmed(stdout),
+        stderr: join_trimmed(stderr),
+    }
+}
+
 fn render_step_stdout(
     f: &mut Frame<'_>,
     app: &App,
@@ -223,33 +291,29 @@ fn render_step_stdout(
     selected: Option<usize>,
     area: Rect,
 ) {
-    let title = match selected.and_then(|i| job.steps.get(i)) {
-        Some(s) => format!("stdout — {}", s.name),
-        None => "stdout".to_string(),
+    let step = selected.and_then(|i| job.steps.get(i));
+    let title = match step {
+        Some(s) => format!(
+            "output — {}  (c: {})",
+            s.name,
+            if app.step_show_command {
+                "hide command"
+            } else {
+                "show command"
+            }
+        ),
+        None => "output".to_string(),
     };
     let block = theme::block_focused(&title);
     let inner_area = block.inner(area);
     f.render_widget(block, area);
 
-    let Some(step) = selected.and_then(|i| job.steps.get(i)) else {
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "(select a step on the left)",
-                Style::default().fg(COLORS.text_muted),
-            ))),
-            inner_area,
-        );
+    let Some(step) = step else {
+        render_pane_message(f, inner_area, "(select a step on the left)");
         return;
     };
-
     if step.output.is_empty() {
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "(no output captured for this step)",
-                Style::default().fg(COLORS.text_muted),
-            ))),
-            inner_area,
-        );
+        render_pane_message(f, inner_area, "(no output captured for this step)");
         return;
     }
 
@@ -265,20 +329,85 @@ fn render_step_stdout(
         output = format!("{}…[truncated]", &output[..end]);
     }
 
-    // Wrap manually instead of Paragraph::wrap: each rendered row then maps
-    // 1:1 onto an entry we control, which is what makes drag-to-copy and
-    // wheel scrolling possible in this pane.
+    let parsed = parse_step_output(&output);
+    let mut rows: Vec<(String, Style)> = Vec::new();
+
+    if app.step_show_command {
+        if let Some(cmd) = &parsed.command {
+            for (i, line) in cmd.split('\n').enumerate() {
+                rows.push((
+                    format!("{}{}", if i == 0 { "❯ " } else { "  " }, line),
+                    Style::default()
+                        .fg(theme::current_accent())
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            rows.push((String::new(), Style::default()));
+        }
+    }
+
+    let has_err = !parsed.stderr.is_empty();
+    if !parsed.stdout.is_empty() {
+        // The stdout header only earns its line when stderr needs
+        // separating from it — clean output stays clean.
+        if has_err {
+            rows.push((
+                "─ stdout ─".to_string(),
+                Style::default().fg(COLORS.text_muted),
+            ));
+        }
+        for line in parsed.stdout.split('\n') {
+            rows.push((line.to_string(), Style::default().fg(COLORS.text_dim)));
+        }
+    }
+    if has_err {
+        if !parsed.stdout.is_empty() {
+            rows.push((String::new(), Style::default()));
+        }
+        rows.push((
+            "─ stderr ─".to_string(),
+            Style::default()
+                .fg(COLORS.error)
+                .add_modifier(Modifier::BOLD),
+        ));
+        for line in parsed.stderr.split('\n') {
+            rows.push((line.to_string(), Style::default().fg(COLORS.error)));
+        }
+    }
+    if rows.is_empty() {
+        render_pane_message(f, inner_area, "(step produced no output)");
+        return;
+    }
+
+    render_scroll_pane(f, app, inner_area, &rows);
+}
+
+fn render_pane_message(f: &mut Frame<'_>, area: Rect, msg: &str) {
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            msg.to_string(),
+            Style::default().fg(COLORS.text_muted),
+        ))),
+        area,
+    );
+}
+
+/// Shared body renderer for the inspector's scrollable panes (Output, Env,
+/// Files): wraps pre-styled logical lines manually so every rendered row
+/// maps 1:1 onto an addressable entry — that mapping is what makes wheel
+/// scrolling (`step_output_scroll`) and drag-to-copy work.
+fn render_scroll_pane(f: &mut Frame<'_>, app: &App, inner_area: Rect, rows: &[(String, Style)]) {
     let width = inner_area.width.max(1) as usize;
-    let wrapped: Vec<String> = output
-        .split('\n')
-        .flat_map(|l| {
-            let chars: Vec<char> = l.chars().collect();
+    let wrapped: Vec<(String, Style)> = rows
+        .iter()
+        .flat_map(|(text, style)| {
+            let chars: Vec<char> = text.chars().collect();
             if chars.is_empty() {
-                vec![String::new()]
+                vec![(String::new(), *style)]
             } else {
                 chars
                     .chunks(width)
-                    .map(|c| c.iter().collect::<String>())
+                    .map(|c| (c.iter().collect::<String>(), *style))
                     .collect::<Vec<_>>()
             }
         })
@@ -294,11 +423,11 @@ fn render_step_stdout(
     let lines: Vec<Line> = wrapped[scroll..end]
         .iter()
         .enumerate()
-        .map(|(pos, l)| {
+        .map(|(pos, (l, style))| {
             let idx = scroll + pos;
             let style = match drag {
                 Some((lo, hi)) if idx >= lo && idx <= hi => theme::selected_style(),
-                _ => Style::default().fg(COLORS.text_dim),
+                _ => *style,
             };
             Line::from(Span::styled(l.clone(), style))
         })
@@ -307,68 +436,140 @@ fn render_step_stdout(
     {
         let mut zones = app.mouse_zones.borrow_mut();
         zones.step_output_window = Some((inner_area, scroll));
-        zones.step_output_lines = wrapped;
+        zones.step_output_lines = wrapped.into_iter().map(|(l, _)| l).collect();
     }
 
     f.render_widget(Paragraph::new(lines), inner_area);
 }
 
-// ─── Env pane (placeholder) ───────────────────────────────────────
-fn render_env_pane(f: &mut Frame<'_>, area: Rect) {
-    let block = theme::block("Process environment");
+// ─── Env pane ─────────────────────────────────────────────────────
+//
+// The executor snapshots the environment each step sees (job env with the
+// step's own `env:` on top) onto its result, secret-masked at capture time.
+fn render_env_pane(
+    f: &mut Frame<'_>,
+    app: &App,
+    job: &crate::models::JobExecution,
+    selected: Option<usize>,
+    area: Rect,
+) {
+    let step = selected.and_then(|i| job.steps.get(i));
+    let title = match step {
+        Some(s) => format!("Environment — {}", s.name),
+        None => "Environment".to_string(),
+    };
+    let block = theme::block_focused(&title);
     let inner_area = block.inner(area);
     f.render_widget(block, area);
-    let lines = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            "Per-step environment capture is not yet plumbed.",
-            Style::default()
-                .fg(COLORS.warning)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "When the executor starts snapshotting `cmd.env` per step, the",
-            Style::default().fg(COLORS.text_dim),
-        )),
-        Line::from(Span::styled(
-            "env table will appear here with secret-masking on by default.",
-            Style::default().fg(COLORS.text_dim),
-        )),
+
+    let Some(step) = step else {
+        render_pane_message(f, inner_area, "(select a step on the left)");
+        return;
+    };
+    if step.env.is_empty() {
+        let msg = if step.is_running() {
+            "(environment appears when the step finishes)"
+        } else {
+            "(no environment captured for this step)"
+        };
+        render_pane_message(f, inner_area, msg);
+        return;
+    }
+
+    let mut rows: Vec<(String, Style)> = vec![
+        (
+            format!("{} variables · secret values masked", step.env.len()),
+            Style::default().fg(COLORS.text_muted),
+        ),
+        (String::new(), Style::default()),
     ];
-    f.render_widget(
-        Paragraph::new(lines).alignment(Alignment::Center),
-        inner_area,
-    );
+    for (k, v) in &step.env {
+        rows.push((format!("{}={}", k, v), Style::default().fg(COLORS.text_dim)));
+    }
+    render_scroll_pane(f, app, inner_area, &rows);
 }
 
-// ─── Files pane (placeholder) ─────────────────────────────────────
-fn render_files_pane(f: &mut Frame<'_>, area: Rect) {
-    let block = theme::block("Workspace changes");
+// ─── Files pane ───────────────────────────────────────────────────
+//
+// Per-step environment-file activity: what the step wrote to
+// $GITHUB_OUTPUT, $GITHUB_ENV and $GITHUB_PATH (captured by the executor
+// when it applies the files after each step).
+fn render_files_pane(
+    f: &mut Frame<'_>,
+    app: &App,
+    job: &crate::models::JobExecution,
+    selected: Option<usize>,
+    area: Rect,
+) {
+    let step = selected.and_then(|i| job.steps.get(i));
+    let title = match step {
+        Some(s) => format!("Environment files — {}", s.name),
+        None => "Environment files".to_string(),
+    };
+    let block = theme::block_focused(&title);
     let inner_area = block.inner(area);
     f.render_widget(block, area);
-    let lines = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            "Workspace diff per step is not yet captured.",
+
+    let Some(step) = step else {
+        render_pane_message(f, inner_area, "(select a step on the left)");
+        return;
+    };
+    if step.is_running() {
+        render_pane_message(f, inner_area, "(file writes appear when the step finishes)");
+        return;
+    }
+    if step.outputs.is_empty() && step.env_writes.is_empty() && step.path_writes.is_empty() {
+        render_pane_message(
+            f,
+            inner_area,
+            "this step wrote nothing to $GITHUB_OUTPUT, $GITHUB_ENV or $GITHUB_PATH",
+        );
+        return;
+    }
+
+    let header = |text: String| -> (String, Style) {
+        (
+            text,
             Style::default()
-                .fg(COLORS.warning)
+                .fg(theme::current_accent())
                 .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Will list new/modified artifacts under the job workspace once the",
-            Style::default().fg(COLORS.text_dim),
-        )),
-        Line::from(Span::styled(
-            "runtime exposes a watched-fs handle.",
-            Style::default().fg(COLORS.text_dim),
-        )),
-    ];
-    f.render_widget(
-        Paragraph::new(lines).alignment(Alignment::Center),
-        inner_area,
+        )
+    };
+    let body_style = Style::default().fg(COLORS.text_dim);
+    let mut rows: Vec<(String, Style)> = Vec::new();
+
+    let section = |rows: &mut Vec<(String, Style)>, name: &str, entries: Vec<String>| {
+        if entries.is_empty() {
+            return;
+        }
+        if !rows.is_empty() {
+            rows.push((String::new(), Style::default()));
+        }
+        rows.push(header(format!("{} — {}", name, entries.len())));
+        for e in entries {
+            rows.push((format!("  {}", e), body_style));
+        }
+    };
+
+    section(
+        &mut rows,
+        "$GITHUB_OUTPUT",
+        step.outputs
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect(),
     );
+    section(
+        &mut rows,
+        "$GITHUB_ENV",
+        step.env_writes
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect(),
+    );
+    section(&mut rows, "$GITHUB_PATH", step.path_writes.clone());
+
+    render_scroll_pane(f, app, inner_area, &rows);
 }
 
 // ─── Matrix pane ──────────────────────────────────────────────────
@@ -683,4 +884,45 @@ fn render_timeline_pane(f: &mut Frame<'_>, job: &crate::models::JobExecution, ar
         .collect();
 
     timing::render(f, inner_area, &rows);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_step_output;
+
+    #[test]
+    fn parses_command_stdout_and_stderr_sections() {
+        let raw = "Command: tools/resolve-images.sh\n\nStandard Output:\nResolution:\n  ying: rebuild\nStandard Error:\nwarning: no creds\n";
+        let parsed = parse_step_output(raw);
+        assert_eq!(parsed.command.as_deref(), Some("tools/resolve-images.sh"));
+        assert_eq!(parsed.stdout, "Resolution:\n  ying: rebuild");
+        assert_eq!(parsed.stderr, "warning: no creds");
+    }
+
+    #[test]
+    fn multiline_commands_stay_in_the_command_section() {
+        let raw = "Command: set -e\nmake build\n\nStandard Output:\ndone\n";
+        let parsed = parse_step_output(raw);
+        assert_eq!(parsed.command.as_deref(), Some("set -e\nmake build"));
+        assert_eq!(parsed.stdout, "done");
+        assert!(parsed.stderr.is_empty());
+    }
+
+    #[test]
+    fn unstructured_output_lands_whole_in_stdout() {
+        let raw = "just some words\nsecond line";
+        let parsed = parse_step_output(raw);
+        assert!(parsed.command.is_none());
+        assert_eq!(parsed.stdout, raw);
+        assert!(parsed.stderr.is_empty());
+    }
+
+    #[test]
+    fn stderr_only_output_parses() {
+        let raw = "Command: false\n\nStandard Error:\nboom\n";
+        let parsed = parse_step_output(raw);
+        assert_eq!(parsed.command.as_deref(), Some("false"));
+        assert!(parsed.stdout.is_empty());
+        assert_eq!(parsed.stderr, "boom");
+    }
 }

@@ -118,6 +118,12 @@ pub struct StepExecution {
     /// Wall-clock start/end from the executor. `None` for synthetic results.
     pub started_at: Option<std::time::SystemTime>,
     pub finished_at: Option<std::time::SystemTime>,
+    /// Environment the step saw (masked, sorted). Empty = not captured.
+    pub env: Vec<(String, String)>,
+    /// `$GITHUB_OUTPUT` / `$GITHUB_ENV` / `$GITHUB_PATH` writes this step made.
+    pub outputs: Vec<(String, String)>,
+    pub env_writes: Vec<(String, String)>,
+    pub path_writes: Vec<String>,
 }
 
 impl StepExecution {

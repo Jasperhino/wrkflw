@@ -25,7 +25,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: greet
-        run: echo hello
+        id: greet
+        run: |
+          echo hello
+          echo "who=world" >> "$GITHUB_OUTPUT"
+          echo "GREETED=yes" >> "$GITHUB_ENV"
       - name: skipped step
         if: ${{ false }}
         run: echo never
@@ -119,4 +123,38 @@ jobs:
         .and_then(|j| j.steps.iter().find(|s| s.name == "greet"))
         .expect("greet result missing");
     assert_eq!(greet_result.finished_at, Some(greet_finish_at));
+
+    // Per-step captures for the inspector panes: the env snapshot exists
+    // and masks the ambient token; $GITHUB_OUTPUT / $GITHUB_ENV writes are
+    // recorded on the step that made them.
+    assert!(
+        !greet_result.env.is_empty(),
+        "expected an env snapshot on the step result"
+    );
+    if let Some((_, v)) = greet_result.env.iter().find(|(k, _)| k == "GITHUB_TOKEN") {
+        assert!(v.is_empty() || v == "***", "GITHUB_TOKEN not masked: {v}");
+    }
+    assert_eq!(
+        greet_result.outputs,
+        vec![("who".to_string(), "world".to_string())]
+    );
+    assert_eq!(
+        greet_result.env_writes,
+        vec![("GREETED".to_string(), "yes".to_string())]
+    );
+
+    // The env written by "greet" is visible to the NEXT step's snapshot.
+    let skipped_step = result
+        .jobs
+        .iter()
+        .find(|j| j.name == "first")
+        .and_then(|j| j.steps.iter().find(|s| s.name == "skipped step"))
+        .expect("skipped step missing");
+    assert!(
+        skipped_step
+            .env
+            .iter()
+            .any(|(k, v)| k == "GREETED" && v == "yes"),
+        "GITHUB_ENV write not visible in the next step's env snapshot"
+    );
 }

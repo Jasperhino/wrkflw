@@ -160,6 +160,7 @@ fn context_hints(app: &App) -> Vec<(&'static str, &'static str)> {
                 vec![
                     ("Tab", "sub-tab"),
                     ("↑↓", "steps"),
+                    ("c", "command"),
                     ("Esc", "back"),
                     ("?", "help"),
                 ]
