@@ -35,10 +35,11 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, rows: &[TimingRow]) {
     for row in rows {
         let (color, status_fill) = bar_props(row.status.clone());
         // A real duration weight overrides the status-based fill; keep at
-        // least a sliver visible for rows that did run.
+        // least a sliver visible for rows that did run. (A weight with
+        // `status: None` is a live, still-running row — info-colored.)
         let fill = match row.weight {
-            Some(w) if row.status.is_some() => w.clamp(0.0, 1.0).max(0.02),
-            _ => status_fill,
+            Some(w) => w.clamp(0.0, 1.0).max(0.02),
+            None => status_fill,
         };
         let filled = (fill * bar_width as f32).round() as usize;
         let empty = bar_width.saturating_sub(filled);

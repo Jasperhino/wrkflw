@@ -2063,6 +2063,8 @@ async fn execute_job(ctx: JobExecutionContext<'_>) -> Result<JobResult, Executio
             .await;
     }
 
+    crate::progress::emit_job_started(ctx.job_name, job_started);
+
     // Clone context and add job-specific variables.
     // `job_env` is the full lookup map (runner + user union); `job_user_env`
     // mirrors only the user-declared slice for `toJSON(env)`.
@@ -2122,6 +2124,7 @@ async fn execute_job(ctx: JobExecutionContext<'_>) -> Result<JobResult, Executio
 
     for (idx, step) in job.steps.iter().enumerate() {
         let remaining = job_deadline.saturating_duration_since(tokio::time::Instant::now());
+        crate::progress::emit_step_started(ctx.job_name, &step_display_name(step, idx));
 
         let outcome = match tokio::time::timeout(
             remaining,
@@ -2175,14 +2178,18 @@ async fn execute_job(ctx: JobExecutionContext<'_>) -> Result<JobResult, Executio
             }
         };
 
-        if loop_state.process_outcome(
+        let abort = loop_state.process_outcome(
             outcome,
             step,
             ctx.verbose,
             &mut job_env,
             &mut job_user_env,
             ctx.services.secret_masker,
-        ) {
+        );
+        if let Some(result) = loop_state.step_results.last() {
+            crate::progress::emit_step_finished(ctx.job_name, result);
+        }
+        if abort {
             job_success = false;
             break;
         }
@@ -2204,14 +2211,16 @@ async fn execute_job(ctx: JobExecutionContext<'_>) -> Result<JobResult, Executio
         &current_dir,
     );
 
+    let final_status = if job_success {
+        JobStatus::Success
+    } else {
+        JobStatus::Failure
+    };
+    crate::progress::emit_job_finished(ctx.job_name, final_status.clone());
     Ok(JobResult {
         name: ctx.job_name.to_string(),
         canonical_name: ctx.job_name.to_string(),
-        status: if job_success {
-            JobStatus::Success
-        } else {
-            JobStatus::Failure
-        },
+        status: final_status,
         steps: loop_state.step_results,
         logs: loop_state.job_logs,
         outputs: job_outputs,
@@ -2323,6 +2332,7 @@ async fn execute_matrix_job(
     let job_started = std::time::SystemTime::now();
     // Create the matrix-specific job name
     let matrix_job_name = wrkflw_matrix::format_combination_name(job_name, combination);
+    crate::progress::emit_job_started(&matrix_job_name, job_started);
 
     wrkflw_logging::info(&format!("Executing matrix job: {}", matrix_job_name));
 
@@ -2418,6 +2428,7 @@ async fn execute_matrix_job(
 
         for (idx, step) in materialized_steps.iter().enumerate() {
             let remaining = job_deadline.saturating_duration_since(tokio::time::Instant::now());
+            crate::progress::emit_step_started(&matrix_job_name, &step_display_name(step, idx));
 
             let outcome = match tokio::time::timeout(
                 remaining,
@@ -2471,14 +2482,18 @@ async fn execute_matrix_job(
                 }
             };
 
-            if loop_state.process_outcome(
+            let abort = loop_state.process_outcome(
                 outcome,
                 step,
                 verbose,
                 &mut job_env,
                 &mut job_user_env,
                 services.secret_masker,
-            ) {
+            );
+            if let Some(result) = loop_state.step_results.last() {
+                crate::progress::emit_step_finished(&matrix_job_name, result);
+            }
+            if abort {
                 all_steps_ok = false;
                 break;
             }
@@ -2504,14 +2519,16 @@ async fn execute_matrix_job(
     );
 
     // Return job result
+    let final_status = if job_success {
+        JobStatus::Success
+    } else {
+        JobStatus::Failure
+    };
+    crate::progress::emit_job_finished(&matrix_job_name, final_status.clone());
     Ok(JobResult {
         name: matrix_job_name,
         canonical_name: job_name.to_string(),
-        status: if job_success {
-            JobStatus::Success
-        } else {
-            JobStatus::Failure
-        },
+        status: final_status,
         steps: loop_state.step_results,
         logs: loop_state.job_logs,
         outputs: job_outputs,
@@ -2772,6 +2789,15 @@ fn format_annotation_location(file: Option<&str>, line: Option<u32>, col: Option
     }
 }
 
+/// Display name for a step: its `name:` or "Step N" (1-based) — the same
+/// name `run_step_with_guards` stamps on results, so progress events and
+/// final results agree.
+fn step_display_name(step: &Step, idx: usize) -> String {
+    step.name
+        .clone()
+        .unwrap_or_else(|| format!("Step {}", idx + 1))
+}
+
 /// Run a step with if-condition and continue-on-error guards.
 /// Returns the step result and whether the job should be aborted.
 async fn run_step_with_guards(
@@ -2789,10 +2815,7 @@ async fn run_step_with_guards(
         result.finished_at = Some(std::time::SystemTime::now());
         result
     };
-    let step_name = step
-        .name
-        .clone()
-        .unwrap_or_else(|| format!("Step {}", step_idx + 1));
+    let step_name = step_display_name(step, step_idx);
 
     // Check step-level if condition
     if let Some(if_cond) = &step.if_condition {
@@ -5072,6 +5095,7 @@ async fn execute_reusable_workflow_job(
     secrets: Option<&serde_yaml::Value>,
 ) -> Result<JobResult, ExecutionError> {
     let job_started = std::time::SystemTime::now();
+    crate::progress::emit_job_started(ctx.job_name, job_started);
     wrkflw_logging::info(&format!(
         "Executing reusable workflow job '{}' -> {}",
         ctx.job_name, uses
@@ -5292,14 +5316,16 @@ async fn run_called_workflow(
     // Aggregate outputs from all jobs in the called workflow
     let outputs = aggregate_reusable_workflow_outputs(&reusable_job_outputs);
 
+    let final_status = if any_failed {
+        JobStatus::Failure
+    } else {
+        JobStatus::Success
+    };
+    crate::progress::emit_job_finished(ctx.job_name, final_status.clone());
     Ok(JobResult {
         name: ctx.job_name.to_string(),
         canonical_name: ctx.job_name.to_string(),
-        status: if any_failed {
-            JobStatus::Failure
-        } else {
-            JobStatus::Success
-        },
+        status: final_status,
         steps: vec![summary_step],
         logs,
         outputs,

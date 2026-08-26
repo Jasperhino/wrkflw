@@ -61,7 +61,7 @@ pub fn render_execution_tab(f: &mut Frame<'_>, app: &mut App, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(50), Constraint::Min(0)])
         .split(main[1]);
-    render_steps_pane(f, workflow, centre[0]);
+    render_steps_pane(f, app, workflow, centre[0]);
     render_live_output_pane(f, app, centre[1]);
 
     let right = Layout::default()
@@ -123,13 +123,15 @@ fn render_summary_strip(f: &mut Frame<'_>, app: &App, idx: usize, area: Rect) {
         chunks[0],
     );
 
-    // Right: progress dots over the active job's steps
+    // Right: progress dots over the active job's steps (live rows carry a
+    // placeholder status until they finish — count only finished ones).
     if let Some(active_job) = active_job_execution(workflow) {
         let total = active_job.steps.len();
         let dots = progress_dots::synthesise(
             &active_job
                 .steps
                 .iter()
+                .filter(|s| !s.is_running())
                 .map(|s| s.status)
                 .collect::<Vec<_>>(),
             total,
@@ -159,8 +161,16 @@ fn render_jobs_pane(f: &mut Frame<'_>, app: &App, idx: usize, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     let active_name = active_job_name(workflow);
     for (i, name) in workflow.job_names.iter().enumerate() {
-        let job_exec = exec.and_then(|e| e.jobs.iter().find(|j| j.name == *name));
+        let job_exec = exec.and_then(|e| {
+            e.jobs
+                .iter()
+                .find(|j| j.name == *name || j.name.starts_with(&format!("{} (", name)))
+        });
         let (sym, sym_style) = match (job_exec, active_name.as_deref() == Some(name)) {
+            (Some(j), _) if j.is_running() => (
+                theme::spinner(app.spinner_frame),
+                Style::default().fg(COLORS.info),
+            ),
             (Some(j), _) => theme::job_status(&j.status),
             (None, true) => (
                 theme::spinner(app.spinner_frame),
@@ -198,11 +208,15 @@ fn render_jobs_pane(f: &mut Frame<'_>, app: &App, idx: usize, area: Rect) {
 
     // Footer summary
     let total = workflow.job_names.len();
+    // Live (still-running) rows carry a placeholder status — count only
+    // finished ones.
     let done = exec
         .map(|e| {
             e.jobs
                 .iter()
-                .filter(|j| matches!(j.status, JobStatus::Success | JobStatus::Skipped))
+                .filter(|j| {
+                    !j.is_running() && matches!(j.status, JobStatus::Success | JobStatus::Skipped)
+                })
                 .count()
         })
         .unwrap_or(0);
@@ -210,7 +224,7 @@ fn render_jobs_pane(f: &mut Frame<'_>, app: &App, idx: usize, area: Rect) {
         .map(|e| {
             e.jobs
                 .iter()
-                .filter(|j| matches!(j.status, JobStatus::Failure))
+                .filter(|j| !j.is_running() && matches!(j.status, JobStatus::Failure))
                 .count()
         })
         .unwrap_or(0);
@@ -236,7 +250,7 @@ fn render_jobs_pane(f: &mut Frame<'_>, app: &App, idx: usize, area: Rect) {
 }
 
 // ─── Steps pane (centre top) ──────────────────────────────────────
-fn render_steps_pane(f: &mut Frame<'_>, workflow: &crate::models::Workflow, area: Rect) {
+fn render_steps_pane(f: &mut Frame<'_>, app: &App, workflow: &crate::models::Workflow, area: Rect) {
     let title = match active_job_execution(workflow) {
         Some(j) => format!("Steps — {}", j.name),
         None => "Steps".to_string(),
@@ -261,9 +275,16 @@ fn render_steps_pane(f: &mut Frame<'_>, workflow: &crate::models::Workflow, area
 
     let mut lines: Vec<Line> = Vec::new();
     for (i, step) in job.steps.iter().enumerate() {
-        let (sym, sym_style) = theme::step_status(&step.status);
+        let (sym, sym_style) = if step.is_running() {
+            (
+                theme::spinner(app.spinner_frame),
+                Style::default().fg(COLORS.info),
+            )
+        } else {
+            theme::step_status(&step.status)
+        };
         let name_style = match step.status {
-            StepStatus::Skipped => Style::default().fg(COLORS.text_muted),
+            StepStatus::Skipped if !step.is_running() => Style::default().fg(COLORS.text_muted),
             _ => Style::default().fg(COLORS.text),
         };
         lines.push(Line::from(vec![
@@ -361,6 +382,9 @@ fn render_dag_pane(f: &mut Frame<'_>, app: &App, idx: usize, area: Rect) {
     let state_of = |name: &str| -> dag::NodeState {
         if let Some(e) = exec {
             if let Some(j) = e.jobs.iter().find(|j| j.name == name) {
+                if j.is_running() {
+                    return dag::NodeState::Running;
+                }
                 return match j.status {
                     JobStatus::Success => dag::NodeState::Success,
                     JobStatus::Failure => dag::NodeState::Failure,
@@ -398,13 +422,14 @@ fn render_timing_pane(f: &mut Frame<'_>, workflow: &crate::models::Workflow, are
         }
     };
 
-    // Real per-job durations from the executor's wall-clock stamps; jobs
-    // without stamps (skipped) fall back to a status label + uniform bar.
+    // Real per-job durations from the executor's wall-clock stamps; a live
+    // (still-running) job ticks against "now", jobs without stamps
+    // (skipped) fall back to a status label + uniform bar.
+    let now = std::time::SystemTime::now();
     let duration_ms = |j: &crate::models::JobExecution| -> Option<u64> {
-        match (j.started_at, j.finished_at) {
-            (Some(s), Some(e)) => Some(e.duration_since(s).ok()?.as_millis() as u64),
-            _ => None,
-        }
+        let start = j.started_at?;
+        let end = j.finished_at.unwrap_or(now);
+        Some(end.duration_since(start).ok()?.as_millis() as u64)
     };
     let max_ms = exec.jobs.iter().filter_map(&duration_ms).max().unwrap_or(0);
 
@@ -427,7 +452,13 @@ fn render_timing_pane(f: &mut Frame<'_>, workflow: &crate::models::Workflow, are
         .zip(labels.iter())
         .map(|(j, label)| TimingRow {
             name: j.name.as_str(),
-            status: Some(j.status.clone()),
+            // `None` = pending/live styling — a running job renders as an
+            // info-colored growing bar rather than a final status color.
+            status: if j.is_running() {
+                None
+            } else {
+                Some(j.status.clone())
+            },
             label: label.as_str(),
             weight: duration_ms(j)
                 .filter(|_| max_ms > 0)
@@ -444,8 +475,12 @@ fn active_job_execution(
 ) -> Option<&crate::models::JobExecution> {
     let exec = workflow.execution_details.as_ref()?;
     if matches!(workflow.status, WorkflowStatus::Running) {
-        // Most-recent job is the one currently driving the run.
-        exec.jobs.last()
+        // Prefer the job that is live right now (real-time progress rows);
+        // fall back to the most recent one.
+        exec.jobs
+            .iter()
+            .rfind(|j| j.is_running())
+            .or_else(|| exec.jobs.last())
     } else {
         // Otherwise prefer the failed job so the live output points at the
         // interesting place; fall back to the last job.
@@ -461,8 +496,12 @@ fn active_job_name(workflow: &crate::models::Workflow) -> Option<String> {
         return None;
     }
     let exec = workflow.execution_details.as_ref()?;
-    // The first job in `job_names` not yet present in `exec.jobs` is the one
-    // about to run; the last job in `exec.jobs` may still be in flight.
+    // A live progress row is authoritative about what's running right now.
+    if let Some(j) = exec.jobs.iter().rfind(|j| j.is_running()) {
+        return Some(j.name.clone());
+    }
+    // Otherwise the first job in `job_names` not yet present in `exec.jobs`
+    // is the one about to run; the last job in `exec.jobs` may be in flight.
     let executed: std::collections::HashSet<&str> =
         exec.jobs.iter().map(|j| j.name.as_str()).collect();
     workflow

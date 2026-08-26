@@ -127,6 +127,7 @@ fn state_for_job(
         return NodeState::Pending;
     };
     match exec.jobs.iter().find(|j| j.name == name) {
+        Some(j) if j.is_running() => NodeState::Running,
         Some(j) => match j.status {
             JobStatus::Success => NodeState::Success,
             JobStatus::Failure => NodeState::Failure,
@@ -199,6 +200,15 @@ fn render_graph(
     // design handoff uses semantic names like "build" / "test", but
     // no such grouping exists in GitHub Actions' workflow YAML today,
     // so putting a name here would mean *inventing* one.
+    // Flat index across all stages — the `dag_selected` cursor space.
+    let mut flat_idx = 0usize;
+    let selected_idx = app.dag_selected.min(
+        levels
+            .iter()
+            .map(|l| l.len())
+            .sum::<usize>()
+            .saturating_sub(1),
+    );
     for (li, layer) in levels.iter().take(visible_stages).enumerate() {
         let col = cols[li];
         let mut lines: Vec<Line> = Vec::new();
@@ -210,6 +220,8 @@ fn render_graph(
         )]));
         lines.push(Line::from(""));
         for name in layer {
+            let node_selected = flat_idx == selected_idx;
+            flat_idx += 1;
             let st = state_for_job(app, workflow, workflow_idx, name);
             let color = match st {
                 NodeState::Success => COLORS.success,
@@ -225,35 +237,47 @@ fn render_graph(
                 NodeState::Running => theme::spinner(app.spinner_frame),
                 NodeState::Pending => theme::symbols::NOT_STARTED,
             };
+            // The selected node's frame switches to the accent (double-line)
+            // so the ↑↓ cursor is visible without repainting the status color.
+            let (frame_color, top, bottom) = if node_selected {
+                (
+                    theme::current_accent(),
+                    "╔════════════════╗",
+                    "╚════════════════╝",
+                )
+            } else {
+                (color, "╭────────────────╮", "╰────────────────╯")
+            };
+            let side = if node_selected { "║" } else { "│" };
             // Node card: two-line "┌─ name ─┐" style in plain text.
             lines.push(Line::from(vec![Span::styled(
-                "╭────────────────╮",
-                Style::default().fg(color),
+                top,
+                Style::default().fg(frame_color),
             )]));
             // Distinct name from the outer `truncated` stage-count
             // binding so the shadow doesn't mislead a future reader.
             let short_name = truncate(name, 12);
             let padding = 12usize.saturating_sub(short_name.chars().count());
             lines.push(Line::from(vec![
-                Span::styled("│ ", Style::default().fg(color)),
+                Span::styled(format!("{} ", side), Style::default().fg(frame_color)),
                 Span::styled(glyph.to_string(), Style::default().fg(color)),
                 Span::raw(" "),
                 Span::styled(
                     short_name,
                     Style::default()
-                        .fg(if matches!(st, NodeState::Running) {
+                        .fg(if node_selected || matches!(st, NodeState::Running) {
                             COLORS.text
                         } else {
                             color
                         })
-                        .add_modifier(if matches!(st, NodeState::Running) {
+                        .add_modifier(if node_selected || matches!(st, NodeState::Running) {
                             Modifier::BOLD
                         } else {
                             Modifier::empty()
                         }),
                 ),
-                Span::styled(" ".repeat(padding), Style::default().fg(color)),
-                Span::styled(" │", Style::default().fg(color)),
+                Span::styled(" ".repeat(padding), Style::default().fg(frame_color)),
+                Span::styled(format!(" {}", side), Style::default().fg(frame_color)),
             ]));
             // Matrix badge for nodes that carry a strategy.matrix.
             let matrix_axes = def
@@ -264,14 +288,14 @@ fn render_graph(
                 .unwrap_or(0);
             if matrix_axes > 0 {
                 lines.push(Line::from(vec![
-                    Span::styled("│ ", Style::default().fg(color)),
+                    Span::styled(format!("{} ", side), Style::default().fg(frame_color)),
                     theme::badge_outline(format!("matrix×{}", matrix_axes), BadgeKind::Info),
-                    Span::styled("         │", Style::default().fg(color)),
+                    Span::styled(format!("         {}", side), Style::default().fg(frame_color)),
                 ]));
             }
             lines.push(Line::from(vec![Span::styled(
-                "╰────────────────╯",
-                Style::default().fg(color),
+                bottom,
+                Style::default().fg(frame_color),
             )]));
         }
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), col);
@@ -321,6 +345,15 @@ fn render_topo_list(
     let levels = dag::topo_levels(def);
     let mut lines: Vec<Line> = Vec::new();
 
+    // Flat index across all stages — the `dag_selected` cursor space.
+    let mut flat_idx = 0usize;
+    let selected_idx = app.dag_selected.min(
+        levels
+            .iter()
+            .map(|l| l.len())
+            .sum::<usize>()
+            .saturating_sub(1),
+    );
     for (li, layer) in levels.iter().enumerate() {
         lines.push(Line::from(vec![Span::styled(
             format!(" Stage {}", li + 1),
@@ -329,6 +362,8 @@ fn render_topo_list(
                 .add_modifier(Modifier::BOLD),
         )]));
         for name in layer {
+            let node_selected = flat_idx == selected_idx;
+            flat_idx += 1;
             let st = state_for_job(app, workflow, workflow_idx, name);
             let (glyph, style) = match st {
                 NodeState::Success => {
@@ -366,14 +401,23 @@ fn render_topo_list(
                 .map(|m| format!(" matrix×{}", m.parameters.len()))
                 .unwrap_or_default();
             lines.push(Line::from(vec![
-                Span::raw("   "),
+                Span::styled(
+                    if node_selected { " ▶ " } else { "   " },
+                    Style::default().fg(theme::current_accent()),
+                ),
                 Span::styled(glyph.to_string(), style),
                 Span::raw(" "),
                 Span::styled(
                     name.clone(),
-                    Style::default()
-                        .fg(COLORS.text)
-                        .add_modifier(Modifier::BOLD),
+                    if node_selected {
+                        Style::default()
+                            .fg(COLORS.text)
+                            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                    } else {
+                        Style::default()
+                            .fg(COLORS.text)
+                            .add_modifier(Modifier::BOLD)
+                    },
                 ),
                 Span::styled(matrix_badge, Style::default().fg(COLORS.info)),
                 Span::styled("  needs: ", Style::default().fg(COLORS.text_muted)),
@@ -430,9 +474,14 @@ fn render_legend(f: &mut Frame<'_>, app: &App, area: Rect) {
             Span::styled("toggle graph/list", Style::default().fg(COLORS.text_dim)),
         ]),
         Line::from(vec![
+            theme::key_chip("↑↓"),
+            Span::raw(" "),
+            Span::styled("select job", Style::default().fg(COLORS.text_dim)),
+        ]),
+        Line::from(vec![
             theme::key_chip("enter"),
             Span::raw(" "),
-            Span::styled("open Execution", Style::default().fg(COLORS.text_dim)),
+            Span::styled("open in Execution", Style::default().fg(COLORS.text_dim)),
         ]),
     ];
     f.render_widget(Paragraph::new(lines), inner);

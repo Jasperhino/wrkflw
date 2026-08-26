@@ -173,14 +173,15 @@ fn context_hints(app: &App) -> Vec<(&'static str, &'static str)> {
             }
         }
         TAB_DAG => vec![
+            ("↑↓", "job"),
+            ("Enter", "open in Execution"),
             ("g", "graph/list"),
-            ("↑↓", "workflows"),
-            (",", "tweaks"),
             ("?", "help"),
         ],
         TAB_GANTT => vec![
-            ("↑↓/wheel", "scroll"),
-            (",", "tweaks"),
+            ("↑↓", "select"),
+            ("Enter", "open in Execution"),
+            ("wheel", "scroll"),
             ("?", "help"),
         ],
         TAB_LOGS => vec![

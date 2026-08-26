@@ -102,6 +102,14 @@ pub struct JobExecution {
     pub finished_at: Option<std::time::SystemTime>,
 }
 
+impl JobExecution {
+    /// Started but not finished — a live progress row. While this is true
+    /// the `status` field is a placeholder and must not be read.
+    pub fn is_running(&self) -> bool {
+        self.started_at.is_some() && self.finished_at.is_none()
+    }
+}
+
 /// Step execution details
 pub struct StepExecution {
     pub name: String,
@@ -110,6 +118,14 @@ pub struct StepExecution {
     /// Wall-clock start/end from the executor. `None` for synthetic results.
     pub started_at: Option<std::time::SystemTime>,
     pub finished_at: Option<std::time::SystemTime>,
+}
+
+impl StepExecution {
+    /// Started but not finished — a live progress row. While this is true
+    /// the `status` field is a placeholder and must not be read.
+    pub fn is_running(&self) -> bool {
+        self.started_at.is_some() && self.finished_at.is_none()
+    }
 }
 
 /// Severity level for status bar toast messages

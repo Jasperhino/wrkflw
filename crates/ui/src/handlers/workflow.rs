@@ -606,6 +606,14 @@ pub fn start_next_workflow_execution(
             });
         }
 
+        // Live progress feed: the executor emits job/step start/finish
+        // events through a process-global sink; the event loop drains them
+        // into the execution details every frame so all views render
+        // real-time state. Torn down when the final result arrives.
+        let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        wrkflw_executor::set_progress_sink(Some(progress_tx));
+        app.progress_rx = Some(progress_rx);
+
         thread::spawn(move || {
             let rt = match tokio::runtime::Runtime::new() {
                 Ok(runtime) => runtime,

@@ -179,7 +179,14 @@ fn render_steps_list(
 
     let mut lines: Vec<Line> = Vec::new();
     for (i, step) in job.steps.iter().enumerate() {
-        let (sym, sym_style) = theme::step_status(&step.status);
+        let (sym, sym_style) = if step.is_running() {
+            (
+                theme::spinner(app.spinner_frame),
+                Style::default().fg(COLORS.info),
+            )
+        } else {
+            theme::step_status(&step.status)
+        };
         let highlighted = selected == Some(i);
         let row_style = if highlighted {
             theme::selected_style()
@@ -187,7 +194,7 @@ fn render_steps_list(
             Style::default()
         };
         let name_style = match step.status {
-            StepStatus::Skipped => Style::default().fg(COLORS.text_muted),
+            StepStatus::Skipped if !step.is_running() => Style::default().fg(COLORS.text_muted),
             _ => Style::default().fg(COLORS.text),
         };
         lines.push(Line::from(vec![
@@ -627,13 +634,14 @@ fn render_timeline_pane(f: &mut Frame<'_>, job: &crate::models::JobExecution, ar
     let inner_area = block.inner(area);
     f.render_widget(block, area);
 
-    // Real per-step durations from the executor's wall-clock stamps; steps
-    // without stamps fall back to a status label + uniform bar.
+    // Real per-step durations from the executor's wall-clock stamps; a live
+    // (still-running) step ticks against "now", steps without stamps fall
+    // back to a status label + uniform bar.
+    let now = std::time::SystemTime::now();
     let duration_ms = |s: &crate::models::StepExecution| -> Option<u64> {
-        match (s.started_at, s.finished_at) {
-            (Some(start), Some(end)) => Some(end.duration_since(start).ok()?.as_millis() as u64),
-            _ => None,
-        }
+        let start = s.started_at?;
+        let end = s.finished_at.unwrap_or(now);
+        Some(end.duration_since(start).ok()?.as_millis() as u64)
     };
     let max_ms = job.steps.iter().filter_map(&duration_ms).max().unwrap_or(0);
 
@@ -656,10 +664,16 @@ fn render_timeline_pane(f: &mut Frame<'_>, job: &crate::models::JobExecution, ar
         .zip(labels.iter())
         .map(|(s, label)| TimingRow {
             name: s.name.as_str(),
-            status: match s.status {
-                StepStatus::Success => Some(JobStatus::Success),
-                StepStatus::Failure => Some(JobStatus::Failure),
-                StepStatus::Skipped => Some(JobStatus::Skipped),
+            // `None` = live styling: a running step renders as an
+            // info-colored growing bar rather than a final status color.
+            status: if s.is_running() {
+                None
+            } else {
+                match s.status {
+                    StepStatus::Success => Some(JobStatus::Success),
+                    StepStatus::Failure => Some(JobStatus::Failure),
+                    StepStatus::Skipped => Some(JobStatus::Skipped),
+                }
             },
             label: label.as_str(),
             weight: duration_ms(s)

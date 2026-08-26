@@ -54,8 +54,8 @@ pub fn render_gantt_tab(f: &mut Frame<'_>, app: &mut App, area: Rect) {
         return;
     };
 
-    // Jobs only arrive when the run completes; while it is live, show the
-    // elapsed clock instead of an empty chart.
+    // Live progress rows stream in while the run executes; before the
+    // first job event, show the elapsed clock instead of an empty chart.
     if exec.jobs.is_empty() {
         let elapsed = chrono::Local::now()
             .signed_duration_since(exec.start_time)
@@ -65,7 +65,7 @@ pub fn render_gantt_tab(f: &mut Frame<'_>, app: &mut App, area: Rect) {
             f,
             inner,
             &format!(
-                "run in progress — {:02}:{:02} elapsed (timeline appears on completion)",
+                "run in progress — {:02}:{:02} elapsed (waiting for the first job to start)",
                 elapsed / 60,
                 elapsed % 60
             ),
@@ -74,17 +74,20 @@ pub fn render_gantt_tab(f: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 
     // ── Time domain ───────────────────────────────────────────────
+    // A row without `finished_at` is still running — its bar (and the
+    // axis) extends to "now", so live bars grow with each frame.
+    let now = SystemTime::now();
     let mut starts: Vec<SystemTime> = Vec::new();
     let mut ends: Vec<SystemTime> = Vec::new();
     for job in &exec.jobs {
-        if let (Some(s), Some(e)) = (job.started_at, job.finished_at) {
+        if let Some(s) = job.started_at {
             starts.push(s);
-            ends.push(e);
+            ends.push(job.finished_at.unwrap_or(now));
         }
         for step in &job.steps {
-            if let (Some(s), Some(e)) = (step.started_at, step.finished_at) {
+            if let Some(s) = step.started_at {
                 starts.push(s);
-                ends.push(e);
+                ends.push(step.finished_at.unwrap_or(now));
             }
         }
     }
@@ -104,39 +107,59 @@ pub fn render_gantt_tab(f: &mut Frame<'_>, app: &mut App, area: Rect) {
         rows.push(GanttRow {
             label: job.name.clone(),
             depth: 0,
-            span_ms: match (job.started_at, job.finished_at) {
-                (Some(s), Some(e)) => Some((ms_from_t0(s), ms_from_t0(e))),
-                _ => None,
+            span_ms: job
+                .started_at
+                .map(|s| (ms_from_t0(s), ms_from_t0(job.finished_at.unwrap_or(now)))),
+            color: if job.is_running() {
+                COLORS.info
+            } else {
+                job_color(&job.status)
             },
-            color: job_color(&job.status),
-            duration_label: duration_label(job.started_at, job.finished_at),
+            duration_label: duration_label(job.started_at, job.finished_at, now),
         });
         for step in &job.steps {
             rows.push(GanttRow {
                 label: step.name.clone(),
                 depth: 1,
-                span_ms: match (step.started_at, step.finished_at) {
-                    (Some(s), Some(e)) => Some((ms_from_t0(s), ms_from_t0(e))),
-                    _ => None,
+                span_ms: step
+                    .started_at
+                    .map(|s| (ms_from_t0(s), ms_from_t0(step.finished_at.unwrap_or(now)))),
+                color: if step.is_running() {
+                    COLORS.info
+                } else {
+                    step_color(&step.status)
                 },
-                color: step_color(&step.status),
-                duration_label: duration_label(step.started_at, step.finished_at),
+                duration_label: duration_label(step.started_at, step.finished_at, now),
             });
         }
     }
 
     // ── Geometry ──────────────────────────────────────────────────
-    if inner.width < 30 || inner.height < 4 {
+    if inner.width < 32 || inner.height < 4 {
         render_message(f, inner, "window too small");
         return;
     }
     let name_w = (inner.width as usize / 3).clamp(16, 30);
     let dur_w = 8usize;
-    // NAME + ' ' + DUR + ' │' + chart
-    let chart_w = inner.width as usize - name_w - 1 - dur_w - 2;
+    // gutter(2) + NAME + ' ' + DUR + ' │' + chart
+    let chart_w = inner.width as usize - 2 - name_w - 1 - dur_w - 2;
 
     // Header (summary) + ruler take the first two lines.
     let body_h = inner.height as usize - 2;
+    // Clamp the row cursor; after a keyboard move, scroll it into view
+    // (wheel scrolling doesn't set the flag, so the viewport can roam).
+    if app.gantt_selected >= rows.len() {
+        app.gantt_selected = rows.len().saturating_sub(1);
+    }
+    if app.gantt_follow {
+        if app.gantt_selected < app.gantt_scroll {
+            app.gantt_scroll = app.gantt_selected;
+        }
+        if app.gantt_selected + 1 > app.gantt_scroll + body_h {
+            app.gantt_scroll = app.gantt_selected + 1 - body_h;
+        }
+        app.gantt_follow = false;
+    }
     let max_scroll = rows.len().saturating_sub(body_h);
     if app.gantt_scroll > max_scroll {
         app.gantt_scroll = max_scroll;
@@ -191,18 +214,46 @@ pub fn render_gantt_tab(f: &mut Frame<'_>, app: &mut App, area: Rect) {
     lines.push(ruler_line(name_w, dur_w, chart_w, total_ms));
 
     // ── Bars ──────────────────────────────────────────────────────
-    for row in rows.iter().skip(scroll).take(body_h) {
-        lines.push(row_line(row, name_w, dur_w, chart_w, total_ms));
+    for (i, row) in rows.iter().enumerate().skip(scroll).take(body_h) {
+        lines.push(row_line(
+            row,
+            i == app.gantt_selected,
+            name_w,
+            dur_w,
+            chart_w,
+            total_ms,
+        ));
     }
 
-    // Record the pane for wheel routing.
-    app.mouse_zones.borrow_mut().gantt = Some(inner);
+    // Record the pane for wheel routing and the row area for click-select.
+    let shown = rows.len().saturating_sub(scroll).min(body_h) as u16;
+    {
+        let mut zones = app.mouse_zones.borrow_mut();
+        zones.gantt = Some(inner);
+        zones.gantt_rows = Some((
+            Rect {
+                x: inner.x,
+                y: inner.y + 2,
+                width: inner.width,
+                height: shown,
+            },
+            scroll,
+            rows.len(),
+        ));
+    }
 
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn row_line(row: &GanttRow, name_w: usize, dur_w: usize, chart_w: usize, total_ms: u64) -> Line<'static> {
-    let (indent, name_style, bar_char) = if row.depth == 0 {
+fn row_line(
+    row: &GanttRow,
+    selected: bool,
+    name_w: usize,
+    dur_w: usize,
+    chart_w: usize,
+    total_ms: u64,
+) -> Line<'static> {
+    let (indent, mut name_style, bar_char) = if row.depth == 0 {
         (
             "",
             Style::default()
@@ -213,9 +264,18 @@ fn row_line(row: &GanttRow, name_w: usize, dur_w: usize, chart_w: usize, total_m
     } else {
         ("  ", Style::default().fg(COLORS.text_dim), '▓')
     };
+    if selected {
+        name_style = name_style
+            .fg(COLORS.text)
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED);
+    }
     let name = format!("{}{}", indent, row.label);
 
     let mut spans = vec![
+        Span::styled(
+            if selected { "▶ " } else { "  " },
+            Style::default().fg(theme::current_accent()),
+        ),
         Span::styled(pad_or_trim(&name, name_w), name_style),
         Span::raw(" "),
         Span::styled(
@@ -274,7 +334,7 @@ fn ruler_line(name_w: usize, dur_w: usize, chart_w: usize, total_ms: u64) -> Lin
         place(chart_w, &fmt_ms(total_ms));
     }
     Line::from(vec![
-        Span::raw(" ".repeat(name_w + 1 + dur_w)),
+        Span::raw(" ".repeat(2 + name_w + 1 + dur_w)),
         Span::styled(" ╽", Style::default().fg(COLORS.border)),
         Span::styled(
             ruler.into_iter().collect::<String>(),
@@ -309,10 +369,14 @@ fn step_color(status: &StepStatus) -> Color {
     }
 }
 
-fn duration_label(start: Option<SystemTime>, end: Option<SystemTime>) -> String {
-    match (start, end) {
-        (Some(s), Some(e)) => fmt_ms(e.duration_since(s).map(|d| d.as_millis() as u64).unwrap_or(0)),
-        _ => "—".to_string(),
+/// Duration text for a row; a started-but-unfinished row ticks against `now`.
+fn duration_label(start: Option<SystemTime>, end: Option<SystemTime>, now: SystemTime) -> String {
+    match start {
+        Some(s) => {
+            let e = end.unwrap_or(now);
+            fmt_ms(e.duration_since(s).map(|d| d.as_millis() as u64).unwrap_or(0))
+        }
+        None => "—".to_string(),
     }
 }
 
@@ -420,9 +484,9 @@ mod tests {
             color: COLORS.success,
             duration_label: "0.5s".to_string(),
         };
-        let line = row_line(&row, 16, 8, 40, 1000);
+        let line = row_line(&row, false, 16, 8, 40, 1000);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        // name(16) + ' ' + dur(8) + ' │' + 20 spaces + 20 block cells
+        // gutter(2) + name(16) + ' ' + dur(8) + ' │' + 20 spaces + 20 cells
         let chart = &text[text.find('│').unwrap() + '│'.len_utf8()..];
         assert!(chart.starts_with(&" ".repeat(20)), "chart: {:?}", chart);
         assert_eq!(chart.chars().filter(|&c| c == '█').count(), 20);
@@ -437,10 +501,24 @@ mod tests {
             color: COLORS.warning,
             duration_label: "—".to_string(),
         };
-        let line = row_line(&row, 16, 8, 40, 1000);
+        let line = row_line(&row, false, 16, 8, 40, 1000);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.ends_with(" —"), "text: {:?}", text);
         assert!(!text.contains('▓'));
+    }
+
+    #[test]
+    fn row_line_marks_the_selected_row() {
+        let row = GanttRow {
+            label: "build".to_string(),
+            depth: 0,
+            span_ms: Some((0, 1000)),
+            color: COLORS.success,
+            duration_label: "1.0s".to_string(),
+        };
+        let line = row_line(&row, true, 16, 8, 40, 1000);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.starts_with("▶ "), "text: {:?}", text);
     }
 
     #[test]

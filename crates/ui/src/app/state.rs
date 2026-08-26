@@ -45,6 +45,9 @@ pub struct MouseZones {
     pub step_output_window: Option<(ratatui::layout::Rect, usize)>,
     /// Gantt tab pane (wheel scroll target).
     pub gantt: Option<ratatui::layout::Rect>,
+    /// Gantt tab bar rows: (rows rect, viewport offset, row count) for
+    /// click-select.
+    pub gantt_rows: Option<(ratatui::layout::Rect, usize, usize)>,
     /// The step-inspector stdout as display-wrapped lines (drag-copy source;
     /// bounded by the pane's 8000-char output cap).
     pub step_output_lines: Vec<String>,
@@ -118,6 +121,18 @@ pub struct App {
     pub step_output_scroll: usize,
     /// Gantt tab vertical scroll, in rows from the top (clamped at render).
     pub gantt_scroll: usize,
+    /// Gantt tab row cursor (index into the flattened job/step rows).
+    pub gantt_selected: usize,
+    /// Set by keyboard selection moves; the next render scrolls the
+    /// selection into view and clears it. Wheel scrolling leaves it unset
+    /// so the viewport can roam away from the selection.
+    pub gantt_follow: bool,
+    /// DAG tab node cursor (index into the flattened topological order).
+    pub dag_selected: usize,
+    /// Live progress events from the executor for the current run
+    /// (installed by `start_next_workflow_execution`, dropped when the
+    /// final result arrives — finals are authoritative).
+    pub progress_rx: Option<tokio::sync::mpsc::UnboundedReceiver<wrkflw_executor::ProgressEvent>>,
     pub job_list_state: ListState, // For viewing job details
     pub detailed_view: bool, // Whether we're in detailed view mode
     pub step_list_state: ListState, // For selecting steps in detailed view
@@ -593,6 +608,10 @@ impl App {
             drag_copy: None,
             step_output_scroll: 0,
             gantt_scroll: 0,
+            gantt_selected: 0,
+            gantt_follow: false,
+            dag_selected: 0,
+            progress_rx: None,
             job_list_state,
             detailed_view: false,
             step_list_state,
@@ -1292,6 +1311,142 @@ impl App {
         }
     }
 
+    /// The workflow the Gantt tab renders: the active execution, else the
+    /// Workflows-tab selection (same resolution as the execution tab).
+    pub fn gantt_workflow_idx(&self) -> Option<usize> {
+        self.current_execution
+            .or_else(|| self.workflow_list_state.selected())
+            .filter(|&idx| idx < self.workflows.len())
+    }
+
+    /// Flattened Gantt rows for the current Gantt workflow:
+    /// `(job index, None)` for a job row, `(job index, Some(step index))`
+    /// for a step row — the same order the Gantt tab renders.
+    pub fn gantt_row_map(&self) -> Vec<(usize, Option<usize>)> {
+        let Some(idx) = self.gantt_workflow_idx() else {
+            return Vec::new();
+        };
+        let Some(exec) = self.workflows[idx].execution_details.as_ref() else {
+            return Vec::new();
+        };
+        let mut map = Vec::new();
+        for (ji, job) in exec.jobs.iter().enumerate() {
+            map.push((ji, None));
+            for si in 0..job.steps.len() {
+                map.push((ji, Some(si)));
+            }
+        }
+        map
+    }
+
+    pub fn gantt_select_prev(&mut self) {
+        self.gantt_selected = self.gantt_selected.saturating_sub(1);
+        self.gantt_follow = true;
+    }
+
+    pub fn gantt_select_next(&mut self) {
+        let len = self.gantt_row_map().len();
+        if len > 0 {
+            self.gantt_selected = (self.gantt_selected + 1).min(len - 1);
+        }
+        self.gantt_follow = true;
+    }
+
+    /// Open the Gantt selection in the Execution tab: a job row lands on
+    /// that job's steps view, a step row additionally selects the step.
+    pub fn gantt_open_selected(&mut self) {
+        let map = self.gantt_row_map();
+        let Some(&(ji, step)) = map.get(self.gantt_selected) else {
+            return;
+        };
+        let Some(wf_idx) = self.gantt_workflow_idx() else {
+            return;
+        };
+        let exec_name = match self.workflows[wf_idx]
+            .execution_details
+            .as_ref()
+            .and_then(|e| e.jobs.get(ji))
+        {
+            Some(job) => job.name.clone(),
+            None => return,
+        };
+        // The jobs pane renders sorted `job_names`; translate the execution
+        // job (possibly a matrix combination "name (combo)") to a pane row.
+        let pane_idx = self
+            .job_pane_index(wf_idx, &exec_name)
+            // Unparseable workflows have no job_names; the pane then lists
+            // execution jobs directly, so the execution index is the row.
+            .unwrap_or(ji);
+        self.job_list_state.select(Some(pane_idx));
+        let step_idx = step.unwrap_or(0);
+        self.step_list_state.select(Some(step_idx));
+        self.step_table_state.select(Some(step_idx));
+        self.step_output_scroll = 0;
+        self.detailed_view = true;
+        self.switch_tab(crate::views::TAB_EXECUTION);
+    }
+
+    /// Jobs-pane row for an execution job name (exact match, or the matrix
+    /// template a "name (combo)" combination expands from).
+    fn job_pane_index(&self, workflow_idx: usize, exec_name: &str) -> Option<usize> {
+        let names = &self.workflows.get(workflow_idx)?.job_names;
+        names.iter().position(|n| n == exec_name).or_else(|| {
+            names
+                .iter()
+                .position(|n| exec_name.starts_with(&format!("{} (", n)))
+        })
+    }
+
+    /// Job names of the DAG-tab workflow in topological order (flattened
+    /// stages) — the order both DAG modes render nodes in.
+    pub fn dag_job_order(&self) -> Vec<String> {
+        let Some(idx) = self.workflow_list_state.selected() else {
+            return Vec::new();
+        };
+        let Some(def) = self.workflows.get(idx).and_then(|w| w.definition.as_ref()) else {
+            return Vec::new();
+        };
+        crate::components::dag::topo_levels(def)
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
+    pub fn dag_select_prev(&mut self) {
+        self.dag_selected = self.dag_selected.saturating_sub(1);
+    }
+
+    pub fn dag_select_next(&mut self) {
+        let len = self.dag_job_order().len();
+        if len > 0 {
+            self.dag_selected = (self.dag_selected + 1).min(len - 1);
+        }
+    }
+
+    /// Open the DAG selection in the Execution tab — the job's steps view
+    /// when it has run, the jobs overview otherwise.
+    pub fn dag_open_selected(&mut self) {
+        let order = self.dag_job_order();
+        let Some(name) = order.get(self.dag_selected.min(order.len().saturating_sub(1))) else {
+            return;
+        };
+        let Some(wf_idx) = self.workflow_list_state.selected() else {
+            return;
+        };
+        let pane_idx = self.workflows[wf_idx]
+            .job_names
+            .iter()
+            .position(|n| n == name)
+            .unwrap_or(0);
+        self.job_list_state.select(Some(pane_idx));
+        self.step_list_state.select(Some(0));
+        self.step_table_state.select(Some(0));
+        self.step_output_scroll = 0;
+        // The steps view only carries content once the job has run.
+        self.detailed_view = self.workflows[wf_idx].job_execution_at(pane_idx).is_some();
+        self.switch_tab(crate::views::TAB_EXECUTION);
+    }
+
     // Change the tab.
     pub fn switch_tab(&mut self, tab: usize) {
         // Full clear on tab change — see the draw loop.
@@ -1341,6 +1496,12 @@ impl App {
             wrkflw_logging::error("Invalid workflow index received in process_execution_result");
             return;
         }
+
+        // Drop the live progress feed before applying finals — the final
+        // results replace live state wholesale, and any events still queued
+        // must not be applied on top of them.
+        wrkflw_executor::set_progress_sink(None);
+        self.progress_rx = None;
 
         let workflow = &mut self.workflows[workflow_idx];
 
@@ -1752,12 +1913,134 @@ impl App {
     pub fn update_running_workflow_progress(&mut self) {
         if let Some(idx) = self.current_execution {
             if let Some(execution) = &mut self.workflows[idx].execution_details {
-                if execution.end_time.is_none() {
-                    // Gradually increase progress for visual feedback
+                // Crawl for visual feedback only until real progress events
+                // arrive (no feed installed, or no job has started yet —
+                // e.g. GitLab pipelines, which don't emit events).
+                if execution.end_time.is_none()
+                    && (self.progress_rx.is_none() || execution.jobs.is_empty())
+                {
                     execution.progress = (execution.progress + 0.01).min(0.95);
                 }
             }
         }
+    }
+
+    /// Drain live executor progress events into the running workflow's
+    /// execution details so views render real-time job/step state. The
+    /// final `Vec<JobResult>` replaces all of this wholesale in
+    /// `process_execution_result` — live rows are a preview, finals are
+    /// authoritative.
+    pub fn drain_progress_events(&mut self) {
+        let Some(rx) = self.progress_rx.as_mut() else {
+            return;
+        };
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+        if events.is_empty() {
+            return;
+        }
+        let Some(idx) = self.current_execution else {
+            return;
+        };
+        let Some(workflow) = self.workflows.get_mut(idx) else {
+            return;
+        };
+        let total_jobs = workflow.job_names.len();
+        let Some(exec) = workflow.execution_details.as_mut() else {
+            return;
+        };
+        for ev in events {
+            Self::apply_progress_event(exec, ev);
+        }
+        if total_jobs > 0 {
+            let finished = exec.jobs.iter().filter(|j| j.finished_at.is_some()).count();
+            exec.progress = (finished as f64 / total_jobs as f64).min(0.95);
+        }
+    }
+
+    fn apply_progress_event(exec: &mut WorkflowExecution, ev: wrkflw_executor::ProgressEvent) {
+        use wrkflw_executor::ProgressEvent as PE;
+        match ev {
+            PE::JobStarted { job, at } => {
+                if !exec.jobs.iter().any(|j| j.name == job && j.is_running()) {
+                    exec.jobs.push(Self::live_job(job, at));
+                }
+            }
+            PE::JobFinished { job, status, at } => {
+                if let Some(j) = exec.jobs.iter_mut().rev().find(|j| j.name == job) {
+                    j.status = status;
+                    j.finished_at = Some(at);
+                }
+            }
+            PE::StepStarted { job, step, at } => {
+                let j = Self::live_job_entry(exec, &job, at);
+                j.steps.push(StepExecution {
+                    name: step,
+                    // Placeholder while running — views key off `is_running`.
+                    status: StepStatus::Success,
+                    output: String::new(),
+                    started_at: Some(at),
+                    finished_at: None,
+                });
+            }
+            PE::StepFinished {
+                job,
+                step,
+                status,
+                output,
+                at,
+            } => {
+                let j = Self::live_job_entry(exec, &job, at);
+                if let Some(s) = j
+                    .steps
+                    .iter_mut()
+                    .rev()
+                    .find(|s| s.name == step && s.is_running())
+                {
+                    s.status = status;
+                    s.output = output;
+                    s.finished_at = Some(at);
+                } else {
+                    // Finish without a matching start (shouldn't happen) —
+                    // record it anyway so nothing silently disappears.
+                    j.steps.push(StepExecution {
+                        name: step,
+                        status,
+                        output,
+                        started_at: None,
+                        finished_at: Some(at),
+                    });
+                }
+            }
+        }
+    }
+
+    fn live_job(name: String, at: std::time::SystemTime) -> JobExecution {
+        JobExecution {
+            name,
+            // Placeholder while running — views key off `is_running`.
+            status: JobStatus::Success,
+            steps: Vec::new(),
+            logs: Vec::new(),
+            started_at: Some(at),
+            finished_at: None,
+        }
+    }
+
+    /// The live row for `name`, creating it if the start event was missed
+    /// (e.g. a reusable workflow's child job whose steps stream in).
+    fn live_job_entry<'a>(
+        exec: &'a mut WorkflowExecution,
+        name: &str,
+        at: std::time::SystemTime,
+    ) -> &'a mut JobExecution {
+        if let Some(pos) = exec.jobs.iter().rposition(|j| j.name == name) {
+            return &mut exec.jobs[pos];
+        }
+        exec.jobs.push(Self::live_job(name.to_string(), at));
+        exec.jobs.last_mut().expect("just pushed")
     }
 
     // Set a temporary error status message to be displayed in the UI

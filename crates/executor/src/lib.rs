@@ -13,6 +13,7 @@ pub mod environment;
 pub mod expression;
 pub mod github_env_files;
 pub mod podman;
+pub mod progress;
 pub mod substitution;
 pub(crate) mod workflow_commands;
 
@@ -22,3 +23,4 @@ pub use engine::{
     detect_runtime, execute_workflow, ExecutionConfig, JobResult, JobStatus, RuntimeType,
     StepResult, StepStatus,
 };
+pub use progress::{set_progress_sink, ProgressEvent, ProgressSender};

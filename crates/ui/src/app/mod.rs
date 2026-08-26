@@ -209,6 +209,9 @@ fn run_tui_event_loop(
             last_tick = Instant::now();
         }
 
+        // Live executor progress (job/step start/finish) → execution details
+        app.drain_progress_events();
+
         // Non-blocking check for execution results
         if let Ok((workflow_idx, result)) = rx.try_recv() {
             app.process_execution_result(workflow_idx, result);
@@ -395,6 +398,21 @@ fn run_tui_event_loop(
                                 }
                             }
                         }
+                        if let Some((r, offset, len)) = zones.gantt_rows {
+                            if Z::hit(r, col, row) {
+                                let idx = offset + (row - r.y) as usize;
+                                if idx < len {
+                                    // First click selects; a click on the
+                                    // already-selected row opens it in the
+                                    // Execution tab.
+                                    if app.gantt_selected == idx {
+                                        app.gantt_open_selected();
+                                    } else {
+                                        app.gantt_selected = idx;
+                                    }
+                                }
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -540,7 +558,8 @@ fn run_tui_event_loop(
                                 app.scroll_logs_up();
                             }
                         }
-                        TAB_GANTT => app.gantt_scroll = app.gantt_scroll.saturating_sub(1),
+                        TAB_DAG => app.dag_select_prev(),
+                        TAB_GANTT => app.gantt_select_prev(),
                         TAB_TRIGGER => app.trigger_tab_prev_workflow(),
                         TAB_SECRETS => app.secrets_tab_prev(),
                         TAB_HELP => app.scroll_help_up(),
@@ -568,7 +587,8 @@ fn run_tui_event_loop(
                                 app.scroll_logs_down();
                             }
                         }
-                        TAB_GANTT => app.gantt_scroll = app.gantt_scroll.saturating_add(1),
+                        TAB_DAG => app.dag_select_next(),
+                        TAB_GANTT => app.gantt_select_next(),
                         TAB_TRIGGER => app.trigger_tab_next_workflow(),
                         TAB_SECRETS => app.secrets_tab_next(),
                         TAB_HELP => app.scroll_help_down(),
@@ -587,6 +607,10 @@ fn run_tui_event_loop(
                     KeyCode::Right => {
                         if app.selected_tab == TAB_EXECUTION && !app.detailed_view {
                             app.toggle_detailed_view();
+                        } else if app.selected_tab == TAB_DAG {
+                            app.dag_open_selected();
+                        } else if app.selected_tab == TAB_GANTT {
+                            app.gantt_open_selected();
                         }
                     }
                     KeyCode::Left => {
@@ -620,6 +644,15 @@ fn run_tui_event_loop(
                             TAB_EXECUTION => {
                                 // In execution tab, Enter shows job details
                                 app.toggle_detailed_view();
+                            }
+                            TAB_DAG => {
+                                // Open the selected node's job in Execution.
+                                app.dag_open_selected();
+                            }
+                            TAB_GANTT => {
+                                // Open the selected row (job or step) in
+                                // the Execution tab's steps view.
+                                app.gantt_open_selected();
                             }
                             TAB_TRIGGER => {
                                 // Trigger tab: Enter on a non-editing row
