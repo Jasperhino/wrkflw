@@ -1877,10 +1877,50 @@ async fn execute_job_with_matrix(
         HashMap::new()
     };
 
-    // Check if this is a matrix job
-    if let Some(matrix_config) = job.matrix_config() {
+    // Check if this is a matrix job. A matrix is either a literal mapping or
+    // a runtime expression such as `${{ fromJSON(needs.plan.outputs.matrix) }}`
+    // — resolve the expression against this job's needs context (built above)
+    // before expansion, exactly when GitHub resolves it.
+    let resolved_matrix: Option<wrkflw_matrix::MatrixConfig> =
+        if let Some(cfg) = job.matrix_config() {
+            Some(cfg.clone())
+        } else if let Some(expr) = job.matrix_expression() {
+            let expr_ctx = crate::expression::ExpressionContext {
+                env_context,
+                step_outputs: &HashMap::new(),
+                matrix_combination: &None,
+                step_statuses: &HashMap::new(),
+                job_status: "success",
+                secrets_context: &secrets_context,
+                needs_context: &needs_ctx,
+                needs_results: &needs_res,
+                user_env,
+            };
+            let workspace = std::path::PathBuf::from(
+                env_context
+                    .get("GITHUB_WORKSPACE")
+                    .cloned()
+                    .unwrap_or_else(|| ".".to_string()),
+            );
+            let resolved =
+                crate::substitution::preprocess_expressions(expr, &workspace, &expr_ctx)
+                    .map_err(|e| {
+                        ExecutionError::Execution(format!(
+                            "Failed to resolve matrix expression for job '{}': {}",
+                            job_name, e
+                        ))
+                    })?;
+            let cfg = wrkflw_matrix::config_from_json(&resolved).map_err(|e| {
+                ExecutionError::Execution(format!("Job '{}': {}", job_name, e))
+            })?;
+            Some(cfg)
+        } else {
+            None
+        };
+
+    if let Some(matrix_config) = resolved_matrix {
         // Expand the matrix into combinations
-        let combinations = wrkflw_matrix::expand_matrix(matrix_config)
+        let combinations = wrkflw_matrix::expand_matrix(&matrix_config)
             .map_err(|e| ExecutionError::Execution(format!("Failed to expand matrix: {}", e)))?;
 
         if combinations.is_empty() {

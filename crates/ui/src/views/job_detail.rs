@@ -366,6 +366,24 @@ fn render_matrix_pane(
         return;
     };
 
+    // A runtime-expression matrix has no static axes to render — its shape
+    // comes from another job's outputs at execution time.
+    let Some(matrix) = matrix.as_config() else {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "(dynamic matrix: {} — resolved from needs outputs at execution time)",
+                strategy
+                    .matrix
+                    .as_ref()
+                    .and_then(wrkflw_matrix::Matrix::as_expression)
+                    .unwrap_or("expression")
+            ),
+            Style::default().fg(COLORS.text_muted),
+        )));
+        f.render_widget(Paragraph::new(lines), inner_area);
+        return;
+    };
+
     for (name, value) in &matrix.parameters {
         let values: Vec<String> = match value.as_sequence() {
             Some(seq) => seq

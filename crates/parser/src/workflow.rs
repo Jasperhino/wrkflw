@@ -2,7 +2,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use wrkflw_matrix::MatrixConfig;
+use wrkflw_matrix::{Matrix, MatrixConfig};
 
 use super::schema::SchemaValidator;
 
@@ -153,7 +153,7 @@ pub struct WorkflowDefinition {
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct Strategy {
     #[serde(default)]
-    pub matrix: Option<MatrixConfig>,
+    pub matrix: Option<Matrix>,
     #[serde(default, rename = "fail-fast")]
     pub fail_fast: Option<bool>,
     #[serde(default, rename = "max-parallel")]
@@ -198,7 +198,19 @@ pub struct Job {
 impl Job {
     /// Get the matrix config from strategy, if present
     pub fn matrix_config(&self) -> Option<&MatrixConfig> {
-        self.strategy.as_ref().and_then(|s| s.matrix.as_ref())
+        self.strategy
+            .as_ref()
+            .and_then(|s| s.matrix.as_ref())
+            .and_then(Matrix::as_config)
+    }
+
+    /// Get the matrix expression from strategy, if the matrix is a runtime
+    /// expression (e.g. `${{ fromJSON(needs.plan.outputs.matrix) }}`).
+    pub fn matrix_expression(&self) -> Option<&str> {
+        self.strategy
+            .as_ref()
+            .and_then(|s| s.matrix.as_ref())
+            .and_then(Matrix::as_expression)
     }
 
     /// Get fail-fast setting: strategy-level takes precedence, then matrix-level, default true

@@ -32,6 +32,46 @@ impl Default for MatrixConfig {
     }
 }
 
+/// A job's `strategy.matrix`: either a literal mapping or a runtime
+/// expression (e.g. `${{ fromJSON(needs.plan.outputs.matrix) }}`) that the
+/// executor resolves against the `needs` context and parses with
+/// [`config_from_json`]. Untagged order matters: mappings deserialize as
+/// `Config`, everything string-shaped falls through to `Expression`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum Matrix {
+    Config(MatrixConfig),
+    Expression(String),
+}
+
+impl Matrix {
+    pub fn as_config(&self) -> Option<&MatrixConfig> {
+        match self {
+            Matrix::Config(c) => Some(c),
+            Matrix::Expression(_) => None,
+        }
+    }
+
+    pub fn as_expression(&self) -> Option<&str> {
+        match self {
+            Matrix::Expression(e) => Some(e.as_str()),
+            Matrix::Config(_) => None,
+        }
+    }
+}
+
+/// Parse a RESOLVED matrix expression into a config. The resolved text is
+/// JSON (typically the payload a `fromJSON(...)` expression carried), and
+/// YAML is a superset of JSON, so the existing serde shape applies.
+pub fn config_from_json(json: &str) -> Result<MatrixConfig, MatrixError> {
+    serde_yaml::from_str(json).map_err(|e| {
+        MatrixError::InvalidParameterFormat(format!(
+            "matrix expression did not resolve to a matrix object: {} (resolved value: {})",
+            e, json
+        ))
+    })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatrixCombination {
     pub values: HashMap<String, Value>,
@@ -139,6 +179,12 @@ fn generate_base_combinations(
     }
 
     if param_arrays.is_empty() {
+        // An include-only matrix (no axes) is valid GitHub Actions: each
+        // include entry becomes one standalone combination. Return no base
+        // combinations and let the include pass add them.
+        if !matrix.include.is_empty() {
+            return Ok(Vec::new());
+        }
         return Err(MatrixError::InvalidParameterFormat(
             "Matrix has no valid parameters".to_string(),
         ));

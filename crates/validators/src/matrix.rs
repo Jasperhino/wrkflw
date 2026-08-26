@@ -2,9 +2,23 @@ use serde_yaml::Value;
 use wrkflw_models::ValidationResult;
 
 pub fn validate_matrix(matrix: &Value, result: &mut ValidationResult) {
+    // A matrix may be a runtime expression (resolved from job outputs at
+    // execution time, e.g. `${{ fromJSON(needs.plan.outputs.matrix) }}`) —
+    // nothing to validate statically.
+    if let Some(s) = matrix.as_str() {
+        let trimmed = s.trim();
+        if trimmed.starts_with("${{") && trimmed.ends_with("}}") {
+            return;
+        }
+        result.add_issue(
+            "Matrix must be a mapping or a ${{ ... }} expression".to_string(),
+        );
+        return;
+    }
+
     // Check if matrix is a mapping
     if !matrix.is_mapping() {
-        result.add_issue("Matrix must be a mapping".to_string());
+        result.add_issue("Matrix must be a mapping or a ${{ ... }} expression".to_string());
         return;
     }
 
