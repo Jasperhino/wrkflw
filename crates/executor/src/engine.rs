@@ -108,6 +108,15 @@ async fn execute_github_workflow(
 
     // 4. Set up GitHub-like environment
     let mut env_context = environment::create_github_context(&workflow, workspace_dir.path());
+    // The repository the workflow file belongs to — the source tree for
+    // emulated same-repo checkouts. Derived from the workflow file's own
+    // location (NOT the invocation cwd, which may be a different repo).
+    if let Some(root) = project_root_of(workflow_path) {
+        env_context.insert(
+            "WRKFLW_PROJECT_ROOT".to_string(),
+            root.to_string_lossy().to_string(),
+        );
+    }
     // Track the user-declared slice of env separately so `toJSON(env)` only
     // dumps what the user actually wrote in YAML (and later, what steps write
     // to `$GITHUB_ENV`). Starts empty — `create_github_context` only seeds
@@ -1016,9 +1025,14 @@ async fn prepare_action(
                 }
             },
             Err(e) => {
+                let hint = if std::env::var("GITHUB_TOKEN").is_err() {
+                    " If this is a private action, export GITHUB_TOKEN (e.g. GITHUB_TOKEN=$(gh auth token))."
+                } else {
+                    ""
+                };
                 wrkflw_logging::warning(&format!(
-                    "Could not fetch action.yml for {}@{}: {}. Falling back to built-in mapping.",
-                    action.repository, action.version, e
+                    "Could not fetch action.yml for {}@{}: {}. Falling back to built-in mapping.{}",
+                    action.repository, action.version, e, hint
                 ));
             }
         }
@@ -3220,45 +3234,123 @@ async fn execute_step(ctx: StepExecutionContext<'_>) -> Result<StepResult, Execu
         // Action step
         let action_info = ctx.workflow.resolve_action(uses);
 
-        // Check if this is the checkout action
-        if uses.starts_with("actions/checkout") {
-            // Get the current directory (assumes this is where your project is)
-            let current_dir = std::env::current_dir().map_err(|e| {
-                ExecutionError::Execution(format!("Failed to get current dir: {}", e))
-            })?;
+        // Checkout-family actions: `actions/checkout` and org forks that wrap
+        // it (e.g. `MyOrg/checkout`). A same-repo checkout copies the
+        // workflow's project tree — the local-first semantics act uses. A
+        // cross-repository checkout (`with.repository`) is a real shallow
+        // clone; GITHUB_TOKEN is used so private repositories resolve.
+        if is_checkout_like(uses) {
+            let with = ctx.step.with.as_ref();
+            let non_empty = |key: &str| {
+                with.and_then(|w| w.get(key))
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            };
+            let dest = match non_empty("path") {
+                Some(p) => ctx.working_dir.join(p),
+                None => ctx.working_dir.to_path_buf(),
+            };
 
-            // Copy the project files to the workspace
-            copy_directory_contents(&current_dir, ctx.working_dir)?;
-
-            // Add info for logs
-            let output = if ctx.verbose {
-                let mut detailed_output =
-                    "Emulated checkout: Copied current directory to workspace\n\n".to_string();
-
-                // Add checkout action details
-                detailed_output.push_str("Checkout Details:\n");
-                detailed_output.push_str("  - Source: Local directory\n");
-                detailed_output
-                    .push_str(&format!("  - Destination: {}\n", ctx.working_dir.display()));
-
-                // Add a summary count instead of listing all files
-                if let Ok(entries) = std::fs::read_dir(&current_dir) {
-                    let entry_count = entries.count();
-                    detailed_output.push_str(&format!(
-                        "\nCopied {} top-level items to workspace\n",
-                        entry_count
-                    ));
+            let output = if let Some(repo) = non_empty("repository") {
+                let token = std::env::var("GITHUB_TOKEN").ok().filter(|t| !t.is_empty());
+                let url = match &token {
+                    Some(t) => format!("https://x-access-token:{}@github.com/{}.git", t, repo),
+                    None => format!("https://github.com/{}.git", repo),
+                };
+                std::fs::create_dir_all(&dest).map_err(|e| {
+                    ExecutionError::Execution(format!(
+                        "Failed to create checkout path {}: {}",
+                        dest.display(),
+                        e
+                    ))
+                })?;
+                let redact = |msg: String| match &token {
+                    Some(t) => msg.replace(t.as_str(), "***"),
+                    None => msg,
+                };
+                match non_empty("ref") {
+                    Some(git_ref) => shallow_clone(&url, &git_ref, &dest).await.map_err(|e| {
+                        ExecutionError::Execution(redact(format!(
+                            "Emulated cross-repo checkout of {} failed: {}",
+                            repo, e
+                        )))
+                    })?,
+                    None => {
+                        // Default branch: plain shallow clone without --branch.
+                        let out = tokio::process::Command::new("git")
+                            .args(["-c", "core.hooksPath=/dev/null"])
+                            .arg("clone")
+                            .arg("--depth")
+                            .arg("1")
+                            .arg("--")
+                            .arg(&url)
+                            .arg(&dest)
+                            .output()
+                            .await
+                            .map_err(|e| {
+                                ExecutionError::Execution(format!(
+                                    "Failed to execute git clone: {}",
+                                    e
+                                ))
+                            })?;
+                        if !out.status.success() {
+                            let stderr = String::from_utf8_lossy(&out.stderr);
+                            return Err(ExecutionError::Execution(redact(format!(
+                                "Emulated cross-repo checkout of {} failed: {}",
+                                repo,
+                                stderr.trim()
+                            ))));
+                        }
+                    }
                 }
-
-                detailed_output
+                format!(
+                    "Emulated checkout: cloned {} into {}",
+                    repo,
+                    dest.display()
+                )
             } else {
-                "Emulated checkout: Copied current directory to workspace".to_string()
+                // Same-repo checkout: copy the workflow's project tree, known
+                // from the workflow file's location (falls back to cwd).
+                let source = ctx
+                    .job_env
+                    .get("WRKFLW_PROJECT_ROOT")
+                    .map(PathBuf::from)
+                    .or_else(|| std::env::current_dir().ok())
+                    .ok_or_else(|| {
+                        ExecutionError::Execution(
+                            "Cannot determine checkout source directory".to_string(),
+                        )
+                    })?;
+                std::fs::create_dir_all(&dest).map_err(|e| {
+                    ExecutionError::Execution(format!(
+                        "Failed to create checkout path {}: {}",
+                        dest.display(),
+                        e
+                    ))
+                })?;
+                copy_directory_contents(&source, &dest)?;
+                // Real actions/checkout produces a git repository, and
+                // workflows legitimately run git (rev-parse, diff-based
+                // affected detection). The filtered tree copy excludes
+                // `.git/`, so bring it over verbatim.
+                let git_dir = source.join(".git");
+                if git_dir.is_dir() {
+                    copy_dir_verbatim(&git_dir, &dest.join(".git")).map_err(|e| {
+                        ExecutionError::Execution(format!(
+                            "Failed to copy .git into workspace: {}",
+                            e
+                        ))
+                    })?;
+                }
+                format!(
+                    "Emulated checkout: copied {} to {}",
+                    source.display(),
+                    dest.display()
+                )
             };
 
             if ctx.verbose {
-                wrkflw_logging::info(
-                    "Emulated actions/checkout: copied project files to workspace",
-                );
+                wrkflw_logging::info(&format!("Emulated {}: {}", uses, output));
             }
 
             StepResult::new(step_name, StepStatus::Success, output)
@@ -3956,6 +4048,54 @@ async fn execute_step(ctx: StepExecutionContext<'_>) -> Result<StepResult, Execu
     };
 
     Ok(step_result)
+}
+
+/// `actions/checkout` or an org fork wrapping it (`<owner>/checkout`).
+/// Sub-path actions (`owner/repo/path`) and local actions (`./…`) are not
+/// checkout-family.
+fn is_checkout_like(uses: &str) -> bool {
+    let repo_part = uses.split('@').next().unwrap_or(uses);
+    if repo_part.starts_with('.') {
+        return false;
+    }
+    let segments: Vec<&str> = repo_part.split('/').collect();
+    segments.len() == 2 && segments[1] == "checkout"
+}
+
+/// The root of the repository a workflow file belongs to: the closest
+/// ancestor containing `.github`, or the workflow file's own directory when
+/// it lives outside a `.github/workflows` layout.
+fn project_root_of(workflow_path: &Path) -> Option<PathBuf> {
+    let abs = workflow_path.canonicalize().ok()?;
+    let mut dir = abs.parent()?;
+    loop {
+        if dir.join(".github").is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => break,
+        }
+    }
+    abs.parent().map(|p| p.to_path_buf())
+}
+
+/// Plain recursive copy with no ignore filtering — used for `.git`, which the
+/// gitignore-aware copy always excludes. Symlinks are skipped (git object
+/// stores don't use them; a broken link must not fail the checkout).
+fn copy_dir_verbatim(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let target = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_verbatim(&entry.path(), &target)?;
+        } else if file_type.is_file() {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
 }
 
 /// Create a gitignore matcher for the given directory
