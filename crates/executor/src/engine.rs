@@ -1779,9 +1779,22 @@ async fn resolve_runner_image(
     if setup_runtimes.is_empty() {
         Ok(base_image)
     } else {
-        // Always build a combined image on the runner base so that essential
-        // tools (git, curl, etc.) remain available for actions like checkout.
-        build_combined_runtime_image(&setup_runtimes, &base_image, runtime).await
+        // Build a combined image on the runner base so that essential tools
+        // (git, curl, etc.) remain available for actions like checkout. This
+        // is an optimization, not a requirement: runtimes that cannot build
+        // images (microsandbox) execute the setup actions for real instead,
+        // with the installed toolchains persisted via the run's
+        // toolcache/home mounts.
+        match build_combined_runtime_image(&setup_runtimes, &base_image, runtime).await {
+            Ok(tag) => Ok(tag),
+            Err(e) => {
+                wrkflw_logging::info(&format!(
+                    "Combined runtime image unavailable ({}); running setup actions directly on {}",
+                    e, base_image
+                ));
+                Ok(base_image)
+            }
+        }
     }
 }
 
@@ -2078,7 +2091,10 @@ async fn execute_job(ctx: JobExecutionContext<'_>) -> Result<JobResult, Executio
 
     // Execute job steps
     // Determine runner image: prefer job container, then detect setup actions, fall back to runs-on
-    let runner_image_value = resolve_runner_image(job, &job.steps, ctx.runtime).await?;
+    let runner_image_value = upgrade_runner_image_for_microsandbox(
+        resolve_runner_image(job, &job.steps, ctx.runtime).await?,
+        &job_env,
+    );
 
     // GHA default job timeout is 360 minutes; sanitize to avoid panic on negative/NaN
     let timeout_mins = sanitize_timeout_minutes(job.timeout_minutes, 360.0);
@@ -2370,7 +2386,10 @@ async fn execute_matrix_job(
         // Execute each step
         // Determine runner image: prefer job container, then detect setup actions, fall back to runs-on
         let runner_image_value =
-            resolve_runner_image(job_template, &materialized_steps, runtime).await?;
+            upgrade_runner_image_for_microsandbox(
+                resolve_runner_image(job_template, &materialized_steps, runtime).await?,
+                &job_env,
+            );
 
         let mut all_steps_ok = true;
         let timeout_mins = sanitize_timeout_minutes(job_template.timeout_minutes, 360.0);
@@ -3489,6 +3508,17 @@ async fn execute_step(ctx: StepExecutionContext<'_>) -> Result<StepResult, Execu
                         {
                             return Ok(StepResult::new(step_name, status, output));
                         }
+                    } else if runtime_mode == "microsandbox"
+                        || runtime_mode == "docker"
+                        || runtime_mode == "podman"
+                    {
+                        // Container runtimes run the action in a node image,
+                        // sharing the workspace/runner-file/toolcache mounts.
+                        if let Some((status, output)) =
+                            execute_node_action_in_container(&ctx, &step_env, &action_info).await?
+                        {
+                            return Ok(StepResult::new(step_name, status, output));
+                        }
                     }
 
                     // Build command for Docker action
@@ -4090,11 +4120,24 @@ async fn execute_step(ctx: StepExecutionContext<'_>) -> Result<StepResult, Execu
 /// job's runner files (GITHUB_OUTPUT / GITHUB_ENV / GITHUB_PATH). Returns
 /// Ok(None) when the step is not a remote Node action — the caller falls
 /// back to the legacy path.
-async fn execute_node_action_on_host(
+/// A Node action fetched to disk with its inputs resolved, ready to execute
+/// either on the host (emulation) or inside a container/microVM.
+struct PreparedNodeAction {
+    /// Keeps the checkout alive for the duration of the execution.
+    _tempdir: tempfile::TempDir,
+    action_dir: PathBuf,
+    main_rel: String,
+    node_version: String,
+    /// INPUT_* variables (step `with` + action.yml defaults).
+    inputs: HashMap<String, String>,
+}
+
+/// Fetch a resolvable Node action at its ref and resolve its inputs.
+/// Returns Ok(None) when the step is not a remote Node action.
+async fn prepare_node_action(
     ctx: &StepExecutionContext<'_>,
-    step_env: &HashMap<String, String>,
     action_info: &ActionInfo,
-) -> Result<Option<(StepStatus, String)>, ExecutionError> {
+) -> Result<Option<PreparedNodeAction>, ExecutionError> {
     if action_info.is_local
         || action_info.is_docker
         || action_info.repository.is_empty()
@@ -4112,12 +4155,10 @@ async fn execute_node_action_on_host(
         Ok(r) => r,
         Err(_) => return Ok(None),
     };
-    if !matches!(
-        resolved.action_type,
-        action_resolver::ActionType::Node { .. }
-    ) {
-        return Ok(None);
-    }
+    let node_version = match &resolved.action_type {
+        action_resolver::ActionType::Node { version } => version.clone(),
+        _ => return Ok(None),
+    };
     let Some(definition) = resolved.definition.as_ref() else {
         return Ok(None);
     };
@@ -4176,18 +4217,18 @@ async fn execute_node_action_on_host(
 
     // Inputs: the step's `with` wins, action.yml defaults fill the rest.
     // GitHub exposes them as INPUT_<name uppercased, spaces to underscores>.
-    let mut env: HashMap<String, String> = step_env.clone();
+    let mut inputs: HashMap<String, String> = HashMap::new();
     let input_key = |name: &str| format!("INPUT_{}", name.to_uppercase().replace(' ', "_"));
     if let Some(with) = &ctx.step.with {
         for (key, value) in with {
-            env.insert(input_key(key), preprocess_with_value(value, ctx));
+            inputs.insert(input_key(key), preprocess_with_value(value, ctx));
         }
     }
-    if let Some(inputs) = definition.get("inputs").and_then(|i| i.as_mapping()) {
-        for (name, spec) in inputs {
+    if let Some(defs) = definition.get("inputs").and_then(|i| i.as_mapping()) {
+        for (name, spec) in defs {
             let Some(name) = name.as_str() else { continue };
             let key = input_key(name);
-            if env.contains_key(&key) {
+            if inputs.contains_key(&key) {
                 continue;
             }
             let Some(default) = spec.get("default") else {
@@ -4209,9 +4250,50 @@ async fn execute_node_action_on_host(
                     value = t.clone();
                 }
             }
-            env.insert(key, value);
+            inputs.insert(key, value);
         }
     }
+
+    wrkflw_logging::debug(&format!(
+        "Node action '{}' resolved inputs: {:?}",
+        action_info.repository,
+        {
+            let mut keys: Vec<&String> = inputs.keys().collect();
+            keys.sort();
+            keys
+        }
+    ));
+
+    if definition.get("runs").and_then(|r| r.get("pre")).is_some() {
+        wrkflw_logging::debug(&format!(
+            "Action '{}' declares a pre step — not executed locally",
+            action_info.repository
+        ));
+    }
+
+    Ok(Some(PreparedNodeAction {
+        _tempdir: tempdir,
+        action_dir,
+        main_rel: main_rel.to_string(),
+        node_version: node_version.to_string(),
+        inputs,
+    }))
+}
+
+/// Execute a prepared Node action FOR REAL on the host (emulation mode) with
+/// the job's env and runner files.
+async fn execute_node_action_on_host(
+    ctx: &StepExecutionContext<'_>,
+    step_env: &HashMap<String, String>,
+    action_info: &ActionInfo,
+) -> Result<Option<(StepStatus, String)>, ExecutionError> {
+    let Some(prepared) = prepare_node_action(ctx, action_info).await? else {
+        return Ok(None);
+    };
+    let main_path = prepared.action_dir.join(&prepared.main_rel);
+
+    let mut env: HashMap<String, String> = step_env.clone();
+    env.extend(prepared.inputs.clone());
     // Toolchain actions expect the runner directories to exist.
     for (key, dir_name) in [
         ("RUNNER_TEMP", "wrkflw-runner-temp"),
@@ -4222,17 +4304,6 @@ async fn execute_node_action_on_host(
             let _ = std::fs::create_dir_all(&dir);
             env.insert(key.to_string(), dir.to_string_lossy().to_string());
         }
-    }
-
-    if definition
-        .get("runs")
-        .and_then(|r| r.get("pre"))
-        .is_some()
-    {
-        wrkflw_logging::debug(&format!(
-            "Action '{}' declares a pre step — not executed in emulation",
-            action_info.repository
-        ));
     }
 
     wrkflw_logging::info(&format!(
@@ -4263,7 +4334,110 @@ async fn execute_node_action_on_host(
         combined.push_str("\n");
         combined.push_str(&stderr);
     }
-    Ok(Some((status, redact(combined))))
+    Ok(Some((status, redact_github_token(combined))))
+}
+
+/// Redact the caller's GITHUB_TOKEN from output destined for logs.
+fn redact_github_token(msg: String) -> String {
+    match std::env::var("GITHUB_TOKEN") {
+        Ok(t) if !t.is_empty() => msg.replace(&t, "***"),
+        _ => msg,
+    }
+}
+
+/// Execute a prepared Node action inside the job's container runtime (one
+/// microVM/container per action step): the action checkout is mounted at
+/// /wrkflw/action and run with `node:<version>-slim`, sharing the workspace,
+/// the GitHub runner files, and (under microsandbox) the persistent
+/// toolcache/home mounts with every other step of the run.
+async fn execute_node_action_in_container(
+    ctx: &StepExecutionContext<'_>,
+    step_env: &HashMap<String, String>,
+    action_info: &ActionInfo,
+) -> Result<Option<(StepStatus, String)>, ExecutionError> {
+    let Some(prepared) = prepare_node_action(ctx, action_info).await? else {
+        return Ok(None);
+    };
+
+    let mut env = step_env.clone();
+    let mount_ctx = prepare_step_container_context(&mut env, ctx.job_env, ctx.container_config);
+    let container_workspace = Path::new("/github/workspace");
+    let container_action_dir = Path::new("/wrkflw/action");
+    let mut volumes = mount_ctx.build_volumes(ctx.working_dir, container_workspace);
+    volumes.push((prepared.action_dir.as_path(), container_action_dir));
+    env.insert(
+        "GITHUB_WORKSPACE".to_string(),
+        container_workspace.to_string_lossy().to_string(),
+    );
+
+    // INPUT_* keys contain dashes, which do not reliably survive env
+    // transport into every guest (msb's handoff drops them in debian-based
+    // images). Ship the inputs as JSON inside the mounted action dir and
+    // load them from a bootstrap instead.
+    let inputs_json = serde_json::to_string(&prepared.inputs).map_err(|e| {
+        ExecutionError::Execution(format!("Failed to serialize action inputs: {}", e))
+    })?;
+    std::fs::write(prepared.action_dir.join(".wrkflw-inputs.json"), inputs_json).map_err(
+        |e| ExecutionError::Execution(format!("Failed to write action inputs: {}", e)),
+    )?;
+    let bootstrap = format!(
+        r#"const path = require("path");
+const inputs = require(path.join(__dirname, ".wrkflw-inputs.json"));
+for (const [k, v] of Object.entries(inputs)) process.env[k] = v;
+const main = path.join(__dirname, {main:?});
+import(require("url").pathToFileURL(main).href).catch((e) => {{
+    console.error(e);
+    process.exit(1);
+}});
+"#,
+        main = prepared.main_rel
+    );
+    std::fs::write(prepared.action_dir.join(".wrkflw-bootstrap.cjs"), bootstrap).map_err(
+        |e| ExecutionError::Execution(format!("Failed to write action bootstrap: {}", e)),
+    )?;
+
+    // Full (non-slim) image: minimal variants lack shared libraries
+    // GitHub runners always carry (pnpm's binary needs libatomic).
+    let image = format!("node:{}", prepared.node_version);
+    let cmd = ["node", "/wrkflw/action/.wrkflw-bootstrap.cjs"];
+    let env_pairs: Vec<(&str, &str)> = env
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+
+    wrkflw_logging::info(&format!(
+        "Executing Node action '{}@{}' in {}",
+        action_info.repository, action_info.version, image
+    ));
+    let output = ctx
+        .runtime
+        .run_container(
+            &image,
+            &cmd,
+            &env_pairs,
+            container_workspace,
+            &volumes,
+            None,
+        )
+        .await
+        .map_err(|e| {
+            ExecutionError::Execution(format!(
+                "Node action '{}' failed to run: {}",
+                action_info.repository, e
+            ))
+        })?;
+
+    let status = if output.exit_code == 0 {
+        StepStatus::Success
+    } else {
+        StepStatus::Failure
+    };
+    let mut combined = output.stdout;
+    if !output.stderr.is_empty() {
+        combined.push_str("\n");
+        combined.push_str(&output.stderr);
+    }
+    Ok(Some((status, redact_github_token(combined))))
 }
 
 /// `actions/checkout` or an org fork wrapping it (`<owner>/checkout`).
@@ -4536,6 +4710,29 @@ fn get_runner_image_from_opt(runs_on: &Option<Vec<String>>) -> String {
     get_runner_image(ro)
 }
 
+/// Image upgrades for the microsandbox runtime: minimal OCI bases lack
+/// shared libraries GitHub runner images always carry (pnpm's native binary
+/// needs libatomic, etc.). Upgrade plain ubuntu bases to the act runner
+/// images — the same substitution act performs for `ubuntu-latest`.
+fn upgrade_runner_image_for_microsandbox(
+    image: String,
+    job_env: &HashMap<String, String>,
+) -> String {
+    let is_msb = job_env
+        .get("WRKFLW_RUNTIME_MODE")
+        .map(|m| m == "microsandbox")
+        .unwrap_or(false);
+    if !is_msb {
+        return image;
+    }
+    match image.as_str() {
+        "ubuntu:latest" => "catthehacker/ubuntu:act-latest".to_string(),
+        "ubuntu:22.04" => "catthehacker/ubuntu:act-22.04".to_string(),
+        "ubuntu:20.04" => "catthehacker/ubuntu:act-20.04".to_string(),
+        _ => image,
+    }
+}
+
 fn get_effective_runner_image(job: &Job) -> String {
     if let Some(ref container) = job.container {
         if container.image.is_empty() {
@@ -4608,10 +4805,12 @@ fn prepare_container_mounts(
     container_config: Option<&JobContainer>,
 ) -> (Vec<VolumePathPair>, Option<VolumePathPair>) {
     let container_github_dir = Path::new("/github/workflow");
-    let is_container_runtime = step_env
+    let runtime_mode = step_env
         .get("WRKFLW_RUNTIME_MODE")
-        .map(|m| m == "docker" || m == "podman")
-        .unwrap_or(false);
+        .cloned()
+        .unwrap_or_default();
+    let is_container_runtime =
+        runtime_mode == "docker" || runtime_mode == "podman" || runtime_mode == "microsandbox";
 
     // Mount GitHub environment files directory and remap paths
     let github_mount = if let Some(github_env_path) = job_env.get("GITHUB_ENV") {
@@ -4651,6 +4850,54 @@ fn prepare_container_mounts(
     // Collect container-defined volumes
     // Docker volume syntax: host:container[:options] — splitn(3) handles the optional :ro/:rw
     let mut owned_volume_paths: Vec<VolumePathPair> = Vec::new();
+
+    // Microsandbox boots a FRESH microVM per step, so toolchain installs
+    // (setup-node, pnpm/setup) and $HOME state must live on host-backed
+    // mounts to survive from one step to the next. Anchored next to the
+    // per-run GitHub env-file directory so every step of the run shares them.
+    if runtime_mode == "microsandbox" {
+        if let Some(run_root) = job_env
+            .get("GITHUB_ENV")
+            .map(Path::new)
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+        {
+            let toolcache = run_root.join("toolcache");
+            let vm_home = run_root.join("vmhome");
+            // RUNNER_TEMP is host-backed too: the microVM's own /tmp is a
+            // small ram/overlay disk, and toolchain downloads (setup-node
+            // tarballs) ENOSPC it immediately.
+            let runner_temp = run_root.join("runnertemp");
+            let _ = std::fs::create_dir_all(&toolcache);
+            let _ = std::fs::create_dir_all(&vm_home);
+            let _ = std::fs::create_dir_all(&runner_temp);
+            owned_volume_paths.push((toolcache, PathBuf::from("/opt/hostedtoolcache")));
+            owned_volume_paths.push((vm_home, PathBuf::from("/github/home")));
+            owned_volume_paths.push((runner_temp, PathBuf::from("/opt/runnertemp")));
+            step_env.insert(
+                "RUNNER_TOOL_CACHE".to_string(),
+                "/opt/hostedtoolcache".to_string(),
+            );
+            step_env.insert("HOME".to_string(), "/github/home".to_string());
+            step_env.insert("RUNNER_TEMP".to_string(), "/opt/runnertemp".to_string());
+            step_env.insert(
+                "GITHUB_WORKSPACE".to_string(),
+                "/github/workspace".to_string(),
+            );
+            // The guest is a Linux microVM at the host's architecture —
+            // host-seeded values (e.g. macOS) would make setup actions
+            // download binaries for the wrong platform.
+            step_env.insert("RUNNER_OS".to_string(), "Linux".to_string());
+            step_env.insert(
+                "RUNNER_ARCH".to_string(),
+                if cfg!(target_arch = "aarch64") {
+                    "ARM64".to_string()
+                } else {
+                    "X64".to_string()
+                },
+            );
+        }
+    }
     if let Some(container_volumes) = container_config.and_then(|c| c.volumes.as_ref()) {
         for vol_spec in container_volumes {
             if vol_spec.is_empty() {

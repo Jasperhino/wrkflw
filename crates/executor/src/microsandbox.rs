@@ -62,6 +62,18 @@ impl ContainerRuntime for MicrosandboxRuntime {
         let mut args: Vec<String> = vec!["run".to_string(), image.to_string()];
 
         for (key, value) in env_vars {
+            // PATH accumulates guest-side additions (GITHUB_PATH entries from
+            // setup actions) plus host noise; the standard bins are appended
+            // so shells inside the VM always resolve, and host-only segments
+            // stay inert.
+            if *key == "PATH" {
+                args.push("-e".to_string());
+                args.push(format!(
+                    "PATH={}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    value
+                ));
+                continue;
+            }
             args.push("-e".to_string());
             args.push(format!("{}={}", key, value));
         }
