@@ -173,6 +173,7 @@ async fn execute_github_workflow(
             RuntimeType::SecureEmulation => "secure_emulation".to_string(),
             RuntimeType::Docker => "docker".to_string(),
             RuntimeType::Podman => "podman".to_string(),
+            RuntimeType::Microsandbox => "microsandbox".to_string(),
         },
     );
 
@@ -368,6 +369,7 @@ async fn execute_gitlab_pipeline(
             RuntimeType::SecureEmulation => "secure_emulation".to_string(),
             RuntimeType::Docker => "docker".to_string(),
             RuntimeType::Podman => "podman".to_string(),
+            RuntimeType::Microsandbox => "microsandbox".to_string(),
         },
     );
 
@@ -619,6 +621,16 @@ fn initialize_runtime(
                 Ok(Box::new(emulation::EmulationRuntime::new()))
             }
         }
+        RuntimeType::Microsandbox => {
+            if crate::microsandbox::MicrosandboxRuntime::is_available() {
+                Ok(Box::new(crate::microsandbox::MicrosandboxRuntime::new()))
+            } else {
+                wrkflw_logging::error(
+                    "msb not found (install: https://github.com/superradcompany/microsandbox),                      falling back to emulation mode",
+                );
+                Ok(Box::new(emulation::EmulationRuntime::new()))
+            }
+        }
         RuntimeType::Podman => {
             if podman::is_available() {
                 Ok(Box::new(podman::PodmanRuntime::new_unchecked(
@@ -644,6 +656,8 @@ pub enum RuntimeType {
     Podman,
     Emulation,
     SecureEmulation,
+    /// One microVM per container run, via the `msb` CLI (microsandbox).
+    Microsandbox,
 }
 
 #[derive(Debug, Clone)]

@@ -183,6 +183,14 @@ pub async fn execute_workflow_cli(
             }
         }
         RuntimeType::SecureEmulation => RuntimeType::SecureEmulation,
+        RuntimeType::Microsandbox => {
+            if wrkflw_executor::microsandbox::MicrosandboxRuntime::is_available() {
+                RuntimeType::Microsandbox
+            } else {
+                wrkflw_logging::warning("msb not found — falling back to emulation mode");
+                RuntimeType::Emulation
+            }
+        }
         RuntimeType::Emulation => RuntimeType::Emulation,
     };
 
@@ -561,6 +569,18 @@ pub fn start_next_workflow_execution(
                 }
             }
             RuntimeType::SecureEmulation => RuntimeType::SecureEmulation,
+            RuntimeType::Microsandbox => {
+                let available = wrkflw_utils::fd::with_stderr_to_null(
+                    wrkflw_executor::microsandbox::MicrosandboxRuntime::is_available,
+                )
+                .unwrap_or(false);
+                if available {
+                    RuntimeType::Microsandbox
+                } else {
+                    wrkflw_logging::warning("msb not found — falling back to emulation mode");
+                    RuntimeType::Emulation
+                }
+            }
             RuntimeType::Emulation => RuntimeType::Emulation,
         };
 

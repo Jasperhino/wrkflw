@@ -105,6 +105,7 @@ pub fn render_title_bar(f: &mut Frame<'_>, app: &App, area: Rect) {
         RuntimeType::Docker => BadgeKind::Docker,
         RuntimeType::Podman => BadgeKind::Podman,
         RuntimeType::SecureEmulation => BadgeKind::Secure,
+        RuntimeType::Microsandbox => BadgeKind::Secure,
         RuntimeType::Emulation => BadgeKind::Emulation,
     };
     right.push(theme::badge_outline(app.runtime_type_name(), runtime_kind));

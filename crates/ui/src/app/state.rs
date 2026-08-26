@@ -471,6 +471,16 @@ impl App {
             }
             RuntimeType::Emulation => RuntimeType::Emulation,
             RuntimeType::SecureEmulation => RuntimeType::SecureEmulation,
+            RuntimeType::Microsandbox => {
+                if wrkflw_executor::microsandbox::MicrosandboxRuntime::is_available() {
+                    RuntimeType::Microsandbox
+                } else {
+                    wrkflw_logging::warning(
+                        "msb not found — falling back to emulation mode",
+                    );
+                    RuntimeType::Emulation
+                }
+            }
         };
 
         // If we're still Docker/Podman after the availability check above, it was available
@@ -571,7 +581,8 @@ impl App {
         self.runtime_type = match self.runtime_type {
             RuntimeType::Auto => RuntimeType::Docker,
             RuntimeType::Docker => RuntimeType::Podman,
-            RuntimeType::Podman => RuntimeType::SecureEmulation,
+            RuntimeType::Podman => RuntimeType::Microsandbox,
+            RuntimeType::Microsandbox => RuntimeType::SecureEmulation,
             RuntimeType::SecureEmulation => RuntimeType::Emulation,
             RuntimeType::Emulation => RuntimeType::Docker,
         };
@@ -938,6 +949,7 @@ impl App {
             RuntimeType::Podman => "Podman",
             RuntimeType::SecureEmulation => "Secure Emulation",
             RuntimeType::Emulation => "Emulation (Unsafe)",
+            RuntimeType::Microsandbox => "Microsandbox",
         }
     }
 

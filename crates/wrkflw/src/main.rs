@@ -20,6 +20,8 @@ pub(crate) enum RuntimeChoice {
     Emulation,
     /// Use secure emulation mode with sandboxing (recommended for untrusted code)
     SecureEmulation,
+    /// Run each container in its own microVM via microsandbox (requires `msb`)
+    Microsandbox,
 }
 
 impl From<RuntimeChoice> for wrkflw_executor::RuntimeType {
@@ -30,6 +32,7 @@ impl From<RuntimeChoice> for wrkflw_executor::RuntimeType {
             RuntimeChoice::Podman => wrkflw_executor::RuntimeType::Podman,
             RuntimeChoice::Emulation => wrkflw_executor::RuntimeType::Emulation,
             RuntimeChoice::SecureEmulation => wrkflw_executor::RuntimeType::SecureEmulation,
+            RuntimeChoice::Microsandbox => wrkflw_executor::RuntimeType::Microsandbox,
         }
     }
 }

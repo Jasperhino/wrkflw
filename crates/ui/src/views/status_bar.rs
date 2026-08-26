@@ -66,6 +66,7 @@ pub fn render_status_bar(f: &mut Frame<'_>, app: &App, area: Rect) {
         RuntimeType::Docker => BadgeKind::Docker,
         RuntimeType::Podman => BadgeKind::Podman,
         RuntimeType::SecureEmulation => BadgeKind::Secure,
+        RuntimeType::Microsandbox => BadgeKind::Secure,
         RuntimeType::Emulation => BadgeKind::Emulation,
     };
     right.push(theme::badge_solid(

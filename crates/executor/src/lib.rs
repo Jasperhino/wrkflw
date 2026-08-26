@@ -7,6 +7,7 @@ pub(crate) mod artifacts;
 pub(crate) mod cache;
 pub mod dependency;
 pub mod docker;
+pub mod microsandbox;
 pub mod engine;
 pub mod environment;
 pub mod expression;
