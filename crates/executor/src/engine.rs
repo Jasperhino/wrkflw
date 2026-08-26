@@ -4125,6 +4125,9 @@ async fn execute_step(ctx: StepExecutionContext<'_>) -> Result<StepResult, Execu
 struct PreparedNodeAction {
     /// Keeps the checkout alive for the duration of the execution.
     _tempdir: tempfile::TempDir,
+    /// The action repository's clone root.
+    repo_dir: PathBuf,
+    /// The action's directory (== repo_dir unless the uses has a sub-path).
     action_dir: PathBuf,
     main_rel: String,
     node_version: String,
@@ -4273,6 +4276,7 @@ async fn prepare_node_action(
 
     Ok(Some(PreparedNodeAction {
         _tempdir: tempdir,
+        repo_dir,
         action_dir,
         main_rel: main_rel.to_string(),
         node_version: node_version.to_string(),
@@ -4365,7 +4369,10 @@ async fn execute_node_action_in_container(
     let container_workspace = Path::new("/github/workspace");
     let container_action_dir = Path::new("/wrkflw/action");
     let mut volumes = mount_ctx.build_volumes(ctx.working_dir, container_workspace);
-    volumes.push((prepared.action_dir.as_path(), container_action_dir));
+    // Mount the CLONE ROOT, not the sub-path dir: sub-actions commonly point
+    // `runs.main` at ../dist/… relative to their directory, which must stay
+    // inside the mount.
+    volumes.push((prepared.repo_dir.as_path(), container_action_dir));
     env.insert(
         "GITHUB_WORKSPACE".to_string(),
         container_workspace.to_string_lossy().to_string(),
@@ -4400,7 +4407,16 @@ import(require("url").pathToFileURL(main).href).catch((e) => {{
     // Full (non-slim) image: minimal variants lack shared libraries
     // GitHub runners always carry (pnpm's binary needs libatomic).
     let image = format!("node:{}", prepared.node_version);
-    let cmd = ["node", "/wrkflw/action/.wrkflw-bootstrap.cjs"];
+    let sub_rel = prepared
+        .action_dir
+        .strip_prefix(&prepared.repo_dir)
+        .unwrap_or_else(|_| Path::new(""));
+    let bootstrap_in_container = Path::new("/wrkflw/action")
+        .join(sub_rel)
+        .join(".wrkflw-bootstrap.cjs")
+        .to_string_lossy()
+        .to_string();
+    let cmd = ["node", bootstrap_in_container.as_str()];
     let env_pairs: Vec<(&str, &str)> = env
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))

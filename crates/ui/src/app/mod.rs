@@ -301,6 +301,8 @@ fn run_tui_event_loop(
                                     app.job_list_state.select(Some(idx));
                                     app.step_list_state.select(Some(0));
                                     app.step_table_state.select(Some(0));
+                                    // Clicking a job opens its steps view.
+                                    app.detailed_view = true;
                                 }
                             }
                         }
