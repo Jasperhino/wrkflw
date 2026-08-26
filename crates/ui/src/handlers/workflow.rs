@@ -651,14 +651,18 @@ pub fn start_next_workflow_execution(
                         target_job,
                     };
 
-                    let execution_result = wrkflw_utils::fd::with_stderr_to_null(|| {
-                        futures::executor::block_on(async {
-                            wrkflw_executor::execute_workflow(&workflow_path, config).await
-                        })
-                    })
-                    .map_err(|e| format!("Failed to redirect stderr during execution: {}", e))?;
+                    // Redirect stderr via the RAII guard and AWAIT the engine
+                    // directly on this runtime. The previous shape nested
+                    // `futures::executor::block_on` inside the tokio runtime,
+                    // parking a worker thread on a non-tokio executor — tokio-
+                    // driven futures (process waits, timers) could then stall
+                    // forever, which froze the TUI mid-run.
+                    let _stderr_guard = wrkflw_utils::fd::RedirectedStderr::to_null()
+                        .map_err(|e| {
+                            format!("Failed to redirect stderr during execution: {}", e)
+                        })?;
 
-                    match execution_result {
+                    match wrkflw_executor::execute_workflow(&workflow_path, config).await {
                         Ok(execution_result) => {
                             // Send back the job results in a wrapped result
                             Ok((execution_result.jobs, ()))
