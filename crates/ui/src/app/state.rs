@@ -43,6 +43,8 @@ pub struct MouseZones {
     pub live_window: Option<(ratatui::layout::Rect, usize)>,
     /// Step-inspector stdout: (inner rect, index of first visible wrapped line).
     pub step_output_window: Option<(ratatui::layout::Rect, usize)>,
+    /// Gantt tab pane (wheel scroll target).
+    pub gantt: Option<ratatui::layout::Rect>,
     /// The step-inspector stdout as display-wrapped lines (drag-copy source;
     /// bounded by the pane's 8000-char output cap).
     pub step_output_lines: Vec<String>,
@@ -114,6 +116,8 @@ pub struct App {
     pub drag_copy: Option<(CopyPane, usize, usize)>,
     /// Step-inspector stdout scroll, in wrapped lines from the top.
     pub step_output_scroll: usize,
+    /// Gantt tab vertical scroll, in rows from the top (clamped at render).
+    pub gantt_scroll: usize,
     pub job_list_state: ListState, // For viewing job details
     pub detailed_view: bool, // Whether we're in detailed view mode
     pub step_list_state: ListState, // For selecting steps in detailed view
@@ -588,6 +592,7 @@ impl App {
             mouse_zones: std::cell::RefCell::new(MouseZones::default()),
             drag_copy: None,
             step_output_scroll: 0,
+            gantt_scroll: 0,
             job_list_state,
             detailed_view: false,
             step_list_state,
@@ -1383,9 +1388,13 @@ impl App {
                                         wrkflw_executor::StepStatus::Skipped => StepStatus::Skipped,
                                     },
                                     output: step_result.output.clone(),
+                                    started_at: step_result.started_at,
+                                    finished_at: step_result.finished_at,
                                 })
                                 .collect::<Vec<StepExecution>>(),
                             logs: vec![job_result.logs.clone()],
+                            started_at: job_result.started_at,
+                            finished_at: job_result.finished_at,
                         })
                         .collect::<Vec<JobExecution>>();
                 }
@@ -1404,8 +1413,12 @@ impl App {
                             name: "Execution Error".to_string(),
                             status: StepStatus::Failure,
                             output: format!("Error: {}\n\nThis error prevented the workflow from executing properly.", e),
+                            started_at: None,
+                            finished_at: None,
                         }],
                         logs: vec![format!("Workflow execution error: {}", e)],
+                        started_at: None,
+                        finished_at: None,
                     }];
                 }
             }

@@ -1,6 +1,7 @@
 // UI Views module
 mod dag_tab;
 mod execution_tab;
+mod gantt_tab;
 mod help_overlay;
 mod job_detail;
 mod logs_tab;
@@ -12,7 +13,8 @@ mod tweaks_overlay;
 mod workflows_tab;
 
 pub use title_bar::{
-    TAB_COUNT, TAB_DAG, TAB_EXECUTION, TAB_HELP, TAB_LOGS, TAB_SECRETS, TAB_TRIGGER, TAB_WORKFLOWS,
+    TAB_COUNT, TAB_DAG, TAB_EXECUTION, TAB_GANTT, TAB_HELP, TAB_LOGS, TAB_SECRETS, TAB_TRIGGER,
+    TAB_WORKFLOWS,
 };
 
 use crate::app::App;
@@ -85,6 +87,7 @@ pub fn render_ui(f: &mut Frame<'_>, app: &mut App) {
             }
         }
         TAB_DAG => dag_tab::render_dag_tab(f, app, main_chunks[1]),
+        TAB_GANTT => gantt_tab::render_gantt_tab(f, app, main_chunks[1]),
         TAB_LOGS => logs_tab::render_logs_tab(f, app, main_chunks[1]),
         TAB_TRIGGER => trigger_tab::render_trigger_tab(f, app, main_chunks[1]),
         TAB_SECRETS => secrets_tab::render_secrets_tab(f, app, main_chunks[1]),

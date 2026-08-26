@@ -5,8 +5,8 @@ use crate::handlers::workflow::start_next_workflow_execution;
 use crate::models::{ExecutionResultMsg, QueuedExecution, Workflow, WorkflowStatus};
 use crate::utils::load_workflows;
 use crate::views::{
-    render_ui, TAB_COUNT, TAB_DAG, TAB_EXECUTION, TAB_HELP, TAB_LOGS, TAB_SECRETS, TAB_TRIGGER,
-    TAB_WORKFLOWS,
+    render_ui, TAB_COUNT, TAB_DAG, TAB_EXECUTION, TAB_GANTT, TAB_HELP, TAB_LOGS, TAB_SECRETS,
+    TAB_TRIGGER, TAB_WORKFLOWS,
 };
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
@@ -319,6 +319,12 @@ fn run_tui_event_loop(
                             } else {
                                 app.log_scroll = app.log_scroll.saturating_add(3);
                             }
+                        } else if over(zones.gantt) {
+                            if up {
+                                app.gantt_scroll = app.gantt_scroll.saturating_sub(3);
+                            } else {
+                                app.gantt_scroll = app.gantt_scroll.saturating_add(3);
+                            }
                         } else if over(zones.jobs_rows.map(|(r, _)| r)) {
                             if up {
                                 app.previous_job();
@@ -498,10 +504,11 @@ fn run_tui_event_loop(
                     KeyCode::Char('1') | KeyCode::Char('w') => app.switch_tab(TAB_WORKFLOWS),
                     KeyCode::Char('2') | KeyCode::Char('x') => app.switch_tab(TAB_EXECUTION),
                     KeyCode::Char('3') => app.switch_tab(TAB_DAG),
-                    KeyCode::Char('4') | KeyCode::Char('l') => app.switch_tab(TAB_LOGS),
-                    KeyCode::Char('5') => app.switch_tab(TAB_TRIGGER),
-                    KeyCode::Char('6') => app.switch_tab(TAB_SECRETS),
-                    KeyCode::Char('7') | KeyCode::Char('h') => app.switch_tab(TAB_HELP),
+                    KeyCode::Char('4') => app.switch_tab(TAB_GANTT),
+                    KeyCode::Char('5') | KeyCode::Char('l') => app.switch_tab(TAB_LOGS),
+                    KeyCode::Char('6') => app.switch_tab(TAB_TRIGGER),
+                    KeyCode::Char('7') => app.switch_tab(TAB_SECRETS),
+                    KeyCode::Char('8') | KeyCode::Char('h') => app.switch_tab(TAB_HELP),
                     KeyCode::Char(',') => {
                         // `,` toggles the Tweaks overlay anywhere (global).
                         // Chosen because it never conflicts with our single-
@@ -533,6 +540,7 @@ fn run_tui_event_loop(
                                 app.scroll_logs_up();
                             }
                         }
+                        TAB_GANTT => app.gantt_scroll = app.gantt_scroll.saturating_sub(1),
                         TAB_TRIGGER => app.trigger_tab_prev_workflow(),
                         TAB_SECRETS => app.secrets_tab_prev(),
                         TAB_HELP => app.scroll_help_up(),
@@ -560,6 +568,7 @@ fn run_tui_event_loop(
                                 app.scroll_logs_down();
                             }
                         }
+                        TAB_GANTT => app.gantt_scroll = app.gantt_scroll.saturating_add(1),
                         TAB_TRIGGER => app.trigger_tab_next_workflow(),
                         TAB_SECRETS => app.secrets_tab_next(),
                         TAB_HELP => app.scroll_help_down(),

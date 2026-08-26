@@ -686,6 +686,11 @@ pub struct JobResult {
     pub logs: String,
     /// Resolved job outputs (from the job's `outputs:` mapping).
     pub outputs: HashMap<String, String>,
+    /// Wall-clock start of the job. `None` for jobs that never ran
+    /// (skipped by condition or fail-fast).
+    pub started_at: Option<std::time::SystemTime>,
+    /// Wall-clock end of the job, stamped alongside `started_at`.
+    pub finished_at: Option<std::time::SystemTime>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -715,6 +720,11 @@ pub struct StepResult {
     pub outcome: StepStatus,
     /// Effective result after `continue-on-error` is applied.
     pub conclusion: StepStatus,
+    /// Wall-clock start, stamped by the step-guard wrapper. `None` for
+    /// results synthesized outside a real step run (validation, summaries).
+    pub started_at: Option<std::time::SystemTime>,
+    /// Wall-clock end, stamped alongside `started_at`.
+    pub finished_at: Option<std::time::SystemTime>,
 }
 
 impl StepResult {
@@ -726,6 +736,8 @@ impl StepResult {
             conclusion: status,
             status,
             output,
+            started_at: None,
+            finished_at: None,
         }
     }
 }
@@ -1904,6 +1916,8 @@ async fn execute_job_with_matrix(
                 steps: Vec::new(),
                 logs: String::new(),
                 outputs: HashMap::new(),
+                started_at: None,
+                finished_at: None,
             }]);
         }
     }
@@ -2037,6 +2051,7 @@ async fn execute_job_with_matrix(
 
 #[allow(unused_variables, unused_assignments)]
 async fn execute_job(ctx: JobExecutionContext<'_>) -> Result<JobResult, ExecutionError> {
+    let job_started = std::time::SystemTime::now();
     // Get job definition
     let job = ctx.workflow.jobs.get(ctx.job_name).ok_or_else(|| {
         ExecutionError::Execution(format!("Job '{}' not found in workflow", ctx.job_name))
@@ -2200,6 +2215,8 @@ async fn execute_job(ctx: JobExecutionContext<'_>) -> Result<JobResult, Executio
         steps: loop_state.step_results,
         logs: loop_state.job_logs,
         outputs: job_outputs,
+        started_at: Some(job_started),
+        finished_at: Some(std::time::SystemTime::now()),
     })
 }
 
@@ -2241,6 +2258,8 @@ async fn execute_matrix_combinations(
                     steps: Vec::new(),
                     logs: "Job skipped due to previous matrix job failure".to_string(),
                     outputs: HashMap::new(),
+                    started_at: None,
+                    finished_at: None,
                 });
             }
             continue;
@@ -2301,6 +2320,7 @@ async fn execute_matrix_job(
     verbose: bool,
     services: &JobServices<'_>,
 ) -> Result<JobResult, ExecutionError> {
+    let job_started = std::time::SystemTime::now();
     // Create the matrix-specific job name
     let matrix_job_name = wrkflw_matrix::format_combination_name(job_name, combination);
 
@@ -2495,6 +2515,8 @@ async fn execute_matrix_job(
         steps: loop_state.step_results,
         logs: loop_state.job_logs,
         outputs: job_outputs,
+        started_at: Some(job_started),
+        finished_at: Some(std::time::SystemTime::now()),
     })
 }
 
@@ -2759,6 +2781,14 @@ async fn run_step_with_guards(
     workflow: &WorkflowDefinition,
     step_exec_ctx: StepExecutionContext<'_>,
 ) -> Result<StepOutcome, ExecutionError> {
+    // Every result leaving this wrapper carries wall-clock timing — this is
+    // the one choke point both the regular and matrix step loops go through.
+    let step_started = std::time::SystemTime::now();
+    let stamp = |mut result: StepResult| -> StepResult {
+        result.started_at = Some(step_started);
+        result.finished_at = Some(std::time::SystemTime::now());
+        result
+    };
     let step_name = step
         .name
         .clone()
@@ -2775,11 +2805,11 @@ async fn run_step_with_guards(
                 step_name,
                 if_cond
             ));
-            return Ok(StepOutcome::Skipped(StepResult::new(
+            return Ok(StepOutcome::Skipped(stamp(StepResult::new(
                 step_name,
                 StepStatus::Skipped,
                 format!("Skipped due to condition: {}", if_cond),
-            )));
+            ))));
         }
     }
 
@@ -2827,7 +2857,10 @@ async fn run_step_with_guards(
             };
             result.outcome = result.status;
             result.conclusion = conclusion;
-            Ok(StepOutcome::Completed { result, abort_job })
+            Ok(StepOutcome::Completed {
+                result: stamp(result),
+                abort_job,
+            })
         }
         Err(e) => {
             let (abort_job, conclusion) = if step.continue_on_error == Some(true) {
@@ -2840,13 +2873,15 @@ async fn run_step_with_guards(
                 (true, StepStatus::Failure)
             };
             Ok(StepOutcome::Completed {
-                result: StepResult {
+                result: stamp(StepResult {
                     name: step_name,
                     status: StepStatus::Failure,
                     output: format!("Error: {}", e),
                     outcome: StepStatus::Failure,
                     conclusion,
-                },
+                    started_at: None,
+                    finished_at: None,
+                }),
                 abort_job,
             })
         }
@@ -5036,6 +5071,7 @@ async fn execute_reusable_workflow_job(
     with: Option<&HashMap<String, String>>,
     secrets: Option<&serde_yaml::Value>,
 ) -> Result<JobResult, ExecutionError> {
+    let job_started = std::time::SystemTime::now();
     wrkflw_logging::info(&format!(
         "Executing reusable workflow job '{}' -> {}",
         ctx.job_name, uses
@@ -5139,18 +5175,32 @@ async fn execute_reusable_workflow_job(
             // Parse called workflow while keeping tempdir alive
             let called = parse_workflow(&joined)?;
 
-            return run_called_workflow(ctx, &called, uses, with, secrets, &joined).await;
+            return run_called_workflow(ctx, &called, uses, with, secrets, &joined, job_started)
+                .await;
         }
     };
 
     // Parse called workflow (for local paths)
     let called = parse_workflow(&workflow_path)?;
 
-    run_called_workflow(ctx, &called, uses, with, secrets, &workflow_path).await
+    run_called_workflow(
+        ctx,
+        &called,
+        uses,
+        with,
+        secrets,
+        &workflow_path,
+        job_started,
+    )
+    .await
 }
 
 /// Shared logic for executing a parsed reusable workflow: builds child env,
 /// propagates secrets, runs batches, and aggregates results into a single `JobResult`.
+///
+/// `job_started` is stamped by the caller so clone/resolve time counts toward
+/// the job's wall time.
+#[allow(clippy::too_many_arguments)]
 async fn run_called_workflow(
     ctx: &JobExecutionContext<'_>,
     called: &WorkflowDefinition,
@@ -5158,6 +5208,7 @@ async fn run_called_workflow(
     with: Option<&HashMap<String, String>>,
     secrets: Option<&serde_yaml::Value>,
     workflow_path: &Path,
+    job_started: std::time::SystemTime,
 ) -> Result<JobResult, ExecutionError> {
     // Create child env context
     let mut child_env = ctx.env_context.clone();
@@ -5252,6 +5303,8 @@ async fn run_called_workflow(
         steps: vec![summary_step],
         logs,
         outputs,
+        started_at: Some(job_started),
+        finished_at: Some(std::time::SystemTime::now()),
     })
 }
 
@@ -8426,6 +8479,8 @@ runs:
             output: String::new(),
             outcome: StepStatus::Failure,
             conclusion: StepStatus::Success, // continue-on-error
+            started_at: None,
+            finished_at: None,
         };
         record_step_status(Some("build"), &result, &mut map, &mut status);
 
@@ -9138,6 +9193,8 @@ runs:
             output: String::new(),
             outcome: StepStatus::Failure,
             conclusion: StepStatus::Success,
+            started_at: None,
+            finished_at: None,
         };
         record_step_status(Some("lint"), &result, &mut step_statuses, &mut job_status);
 

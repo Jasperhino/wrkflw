@@ -398,13 +398,26 @@ fn render_timing_pane(f: &mut Frame<'_>, workflow: &crate::models::Workflow, are
         }
     };
 
+    // Real per-job durations from the executor's wall-clock stamps; jobs
+    // without stamps (skipped) fall back to a status label + uniform bar.
+    let duration_ms = |j: &crate::models::JobExecution| -> Option<u64> {
+        match (j.started_at, j.finished_at) {
+            (Some(s), Some(e)) => Some(e.duration_since(s).ok()?.as_millis() as u64),
+            _ => None,
+        }
+    };
+    let max_ms = exec.jobs.iter().filter_map(&duration_ms).max().unwrap_or(0);
+
     let labels: Vec<String> = exec
         .jobs
         .iter()
-        .map(|j| match j.status {
-            JobStatus::Success => "ok".to_string(),
-            JobStatus::Failure => "fail".to_string(),
-            JobStatus::Skipped => "skip".to_string(),
+        .map(|j| match duration_ms(j) {
+            Some(ms) => super::gantt_tab::fmt_ms(ms),
+            None => match j.status {
+                JobStatus::Success => "ok".to_string(),
+                JobStatus::Failure => "fail".to_string(),
+                JobStatus::Skipped => "skip".to_string(),
+            },
         })
         .collect();
 
@@ -416,6 +429,9 @@ fn render_timing_pane(f: &mut Frame<'_>, workflow: &crate::models::Workflow, are
             name: j.name.as_str(),
             status: Some(j.status.clone()),
             label: label.as_str(),
+            weight: duration_ms(j)
+                .filter(|_| max_ms > 0)
+                .map(|ms| ms as f32 / max_ms as f32),
         })
         .collect();
 

@@ -627,13 +627,26 @@ fn render_timeline_pane(f: &mut Frame<'_>, job: &crate::models::JobExecution, ar
     let inner_area = block.inner(area);
     f.render_widget(block, area);
 
+    // Real per-step durations from the executor's wall-clock stamps; steps
+    // without stamps fall back to a status label + uniform bar.
+    let duration_ms = |s: &crate::models::StepExecution| -> Option<u64> {
+        match (s.started_at, s.finished_at) {
+            (Some(start), Some(end)) => Some(end.duration_since(start).ok()?.as_millis() as u64),
+            _ => None,
+        }
+    };
+    let max_ms = job.steps.iter().filter_map(&duration_ms).max().unwrap_or(0);
+
     let labels: Vec<String> = job
         .steps
         .iter()
-        .map(|s| match s.status {
-            StepStatus::Success => "ok".to_string(),
-            StepStatus::Failure => "fail".to_string(),
-            StepStatus::Skipped => "skip".to_string(),
+        .map(|s| match duration_ms(s) {
+            Some(ms) => super::gantt_tab::fmt_ms(ms),
+            None => match s.status {
+                StepStatus::Success => "ok".to_string(),
+                StepStatus::Failure => "fail".to_string(),
+                StepStatus::Skipped => "skip".to_string(),
+            },
         })
         .collect();
 
@@ -649,6 +662,9 @@ fn render_timeline_pane(f: &mut Frame<'_>, job: &crate::models::JobExecution, ar
                 StepStatus::Skipped => Some(JobStatus::Skipped),
             },
             label: label.as_str(),
+            weight: duration_ms(s)
+                .filter(|_| max_ms > 0)
+                .map(|ms| ms as f32 / max_ms as f32),
         })
         .collect();
 

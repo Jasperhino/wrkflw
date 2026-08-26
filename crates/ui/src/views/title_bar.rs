@@ -11,10 +11,11 @@ use ratatui::{
 };
 use wrkflw_executor::RuntimeType;
 
-pub const TAB_LABELS: [&str; 7] = [
+pub const TAB_LABELS: [&str; 8] = [
     "Workflows",
     "Execution",
     "DAG",
+    "Gantt",
     "Logs",
     "Trigger",
     "Secrets",
@@ -28,10 +29,11 @@ pub const TAB_COUNT: usize = TAB_LABELS.len();
 pub const TAB_WORKFLOWS: usize = 0;
 pub const TAB_EXECUTION: usize = 1;
 pub const TAB_DAG: usize = 2;
-pub const TAB_LOGS: usize = 3;
-pub const TAB_TRIGGER: usize = 4;
-pub const TAB_SECRETS: usize = 5;
-pub const TAB_HELP: usize = 6;
+pub const TAB_GANTT: usize = 3;
+pub const TAB_LOGS: usize = 4;
+pub const TAB_TRIGGER: usize = 5;
+pub const TAB_SECRETS: usize = 6;
+pub const TAB_HELP: usize = 7;
 
 pub fn render_title_bar(f: &mut Frame<'_>, app: &App, area: Rect) {
     let chunks = Layout::default()

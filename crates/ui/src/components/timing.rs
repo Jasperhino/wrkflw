@@ -1,9 +1,9 @@
 // Per-job timing chart — horizontal bars sized against the longest run.
 //
-// We don't have per-job wall-clock timing today (executor only reports terminal
-// statuses, no `started_at` per job). For now we render uniform-width bars
-// coloured by status so the panel is visually present and honest. When timing
-// metadata lands later, swap `weight=1.0` for `(elapsed / max).min(1.0)`.
+// Rows carry an optional `weight` (this row's duration relative to the
+// longest, from the executor's wall-clock stamps). With a weight the bar
+// length is proportional; without one (skipped jobs, results from before
+// timing landed) we fall back to uniform status-coloured bars.
 
 use crate::theme::COLORS;
 use ratatui::{
@@ -20,6 +20,9 @@ pub struct TimingRow<'a> {
     pub name: &'a str,
     pub status: Option<JobStatus>, // None = pending
     pub label: &'a str,            // e.g. "1m 47s" or "—"
+    /// Duration relative to the longest row, 0.0–1.0. `None` = no timing
+    /// data, fall back to the status-based fill.
+    pub weight: Option<f32>,
 }
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, rows: &[TimingRow]) {
@@ -30,7 +33,13 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, rows: &[TimingRow]) {
     let bar_width = area.width.saturating_sub(18) as usize;
     let mut lines: Vec<Line> = Vec::with_capacity(rows.len());
     for row in rows {
-        let (color, fill) = bar_props(row.status.clone());
+        let (color, status_fill) = bar_props(row.status.clone());
+        // A real duration weight overrides the status-based fill; keep at
+        // least a sliver visible for rows that did run.
+        let fill = match row.weight {
+            Some(w) if row.status.is_some() => w.clamp(0.0, 1.0).max(0.02),
+            _ => status_fill,
+        };
         let filled = (fill * bar_width as f32).round() as usize;
         let empty = bar_width.saturating_sub(filled);
 

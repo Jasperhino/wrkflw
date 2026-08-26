@@ -96,6 +96,10 @@ pub struct JobExecution {
     pub status: JobStatus,
     pub steps: Vec<StepExecution>,
     pub logs: Vec<String>,
+    /// Wall-clock start/end from the executor. `None` for jobs that never
+    /// ran (skipped) or synthetic results (validation, error placeholders).
+    pub started_at: Option<std::time::SystemTime>,
+    pub finished_at: Option<std::time::SystemTime>,
 }
 
 /// Step execution details
@@ -103,6 +107,9 @@ pub struct StepExecution {
     pub name: String,
     pub status: StepStatus,
     pub output: String,
+    /// Wall-clock start/end from the executor. `None` for synthetic results.
+    pub started_at: Option<std::time::SystemTime>,
+    pub finished_at: Option<std::time::SystemTime>,
 }
 
 /// Severity level for status bar toast messages
