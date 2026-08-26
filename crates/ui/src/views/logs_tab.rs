@@ -122,5 +122,6 @@ pub fn render_logs_tab(f: &mut Frame<'_>, app: &App, area: Rect) {
         log_table_state.select(Some(app.log_scroll.min(filtered_logs.len() - 1)));
     }
 
+    app.mouse_zones.borrow_mut().logs = Some(chunks[content_idx]);
     f.render_stateful_widget(log_table, chunks[content_idx], &mut log_table_state);
 }

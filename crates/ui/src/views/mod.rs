@@ -53,6 +53,9 @@ pub fn render_ui(f: &mut Frame<'_>, app: &mut App) {
         return;
     }
 
+    // Fresh hit-zones for this frame.
+    *app.mouse_zones.borrow_mut() = crate::app::MouseZones::default();
+
     let size = f.area();
 
     // Create main layout

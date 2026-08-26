@@ -17,6 +17,37 @@ use wrkflw_executor::{JobStatus, RuntimeType, StepStatus};
 use wrkflw_secrets::SecretConfig;
 
 /// Application state
+
+/// Clickable/scrollable regions recorded during render (interior mutability:
+/// views take &App). Cleared at the start of every frame; the mouse handler
+/// hit-tests the LAST rendered frame, which is exactly what the user sees.
+#[derive(Default, Clone)]
+pub struct MouseZones {
+    /// (tab index, label rect) in the title bar.
+    pub tabs: Vec<(usize, ratatui::layout::Rect)>,
+    /// Workflows table rows: (rows rect, viewport offset, row count).
+    pub workflow_rows: Option<(ratatui::layout::Rect, usize, usize)>,
+    /// Execution tab jobs pane rows: (rect, row count). Rendered from 0.
+    pub jobs_rows: Option<(ratatui::layout::Rect, usize)>,
+    /// Job-detail steps rows: (rect, row count). Rendered from 0.
+    pub step_rows: Option<(ratatui::layout::Rect, usize)>,
+    /// Live-output pane (wheel scroll target).
+    pub live_output: Option<ratatui::layout::Rect>,
+    /// Logs tab content (wheel scroll target).
+    pub logs: Option<ratatui::layout::Rect>,
+    /// Runtime badge in the status bar (click cycles the runtime).
+    pub runtime_badge: Option<ratatui::layout::Rect>,
+}
+
+impl MouseZones {
+    pub fn hit(rect: ratatui::layout::Rect, column: u16, row: u16) -> bool {
+        column >= rect.x
+            && column < rect.x.saturating_add(rect.width)
+            && row >= rect.y
+            && row < rect.y.saturating_add(rect.height)
+    }
+}
+
 pub struct App {
     pub workflows: Vec<Workflow>,
     pub workflow_list_state: ListState,
@@ -36,6 +67,8 @@ pub struct App {
     pub live_output_scroll: usize,
     /// Request a full terminal clear before the next frame (tab switches).
     pub force_clear: bool,
+    /// Mouse hit-zones recorded by the last rendered frame.
+    pub mouse_zones: std::cell::RefCell<MouseZones>,
     pub job_list_state: ListState, // For viewing job details
     pub detailed_view: bool, // Whether we're in detailed view mode
     pub step_list_state: ListState, // For selecting steps in detailed view
@@ -507,6 +540,7 @@ impl App {
             log_scroll: 0,
             live_output_scroll: 0,
             force_clear: false,
+            mouse_zones: std::cell::RefCell::new(MouseZones::default()),
             job_list_state,
             detailed_view: false,
             step_list_state,

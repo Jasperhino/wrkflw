@@ -111,8 +111,12 @@ impl ContainerRuntime for MicrosandboxRuntime {
             image,
             volumes.len()
         ));
+        // stdin is nulled: under the TUI the terminal writes mouse reports
+        // to the app's stdin, and an inheriting child echoes them straight
+        // into its captured output.
         let output = tokio::process::Command::new("msb")
             .args(&args)
+            .stdin(std::process::Stdio::null())
             .output()
             .await
             .map_err(|e| {
@@ -129,6 +133,7 @@ impl ContainerRuntime for MicrosandboxRuntime {
     async fn pull_image(&self, image: &str) -> Result<(), ContainerError> {
         let output = tokio::process::Command::new("msb")
             .args(["pull", image])
+            .stdin(std::process::Stdio::null())
             .output()
             .await
             .map_err(|e| ContainerError::ImagePull(format!("Failed to execute msb: {}", e)))?;

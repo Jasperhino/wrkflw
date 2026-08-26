@@ -116,6 +116,18 @@ fn render_workflow_list(f: &mut Frame<'_>, app: &mut App, area: Rect) {
     table_state.select(app.workflow_list_state.selected());
 
     f.render_stateful_widget(table, area, &mut table_state);
+    // Data rows start below the block border (1) and the header row (1);
+    // the state's offset after render is the actual viewport scroll.
+    if area.height > 3 && area.width > 2 {
+        let rows_rect = ratatui::layout::Rect {
+            x: area.x + 1,
+            y: area.y + 2,
+            width: area.width - 2,
+            height: area.height - 3,
+        };
+        app.mouse_zones.borrow_mut().workflow_rows =
+            Some((rows_rect, table_state.offset(), app.workflows.len()));
+    }
     app.workflow_list_state.select(table_state.selected());
 }
 

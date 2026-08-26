@@ -59,7 +59,7 @@ pub fn render_job_detail_view(f: &mut Frame<'_>, app: &mut App, area: Rect) {
         .filter(|&i| i < job.steps.len());
 
     match app.step_inspector_tab {
-        0 => render_output_pane(f, job, selected_step_idx, outer[2]),
+        0 => render_output_pane(f, app, job, selected_step_idx, outer[2]),
         1 => render_env_pane(f, outer[2]),
         2 => render_files_pane(f, outer[2]),
         3 => render_matrix_pane(f, workflow, &job.name, outer[2]),
@@ -150,6 +150,7 @@ fn render_tab_strip(f: &mut Frame<'_>, active: usize, area: Rect) {
 // ─── Output pane (default) ────────────────────────────────────────
 fn render_output_pane(
     f: &mut Frame<'_>,
+    app: &App,
     job: &crate::models::JobExecution,
     selected_step: Option<usize>,
     area: Rect,
@@ -159,12 +160,13 @@ fn render_output_pane(
         .constraints([Constraint::Length(34), Constraint::Min(0)])
         .split(area);
 
-    render_steps_list(f, job, selected_step, cols[0]);
+    render_steps_list(f, app, job, selected_step, cols[0]);
     render_step_stdout(f, job, selected_step, cols[1]);
 }
 
 fn render_steps_list(
     f: &mut Frame<'_>,
+    app: &App,
     job: &crate::models::JobExecution,
     selected: Option<usize>,
     area: Rect,
@@ -172,6 +174,8 @@ fn render_steps_list(
     let block = theme::block("Steps");
     let inner_area = block.inner(area);
     f.render_widget(block, area);
+
+    app.mouse_zones.borrow_mut().step_rows = Some((inner_area, job.steps.len()));
 
     let mut lines: Vec<Line> = Vec::new();
     for (i, step) in job.steps.iter().enumerate() {
@@ -241,9 +245,16 @@ fn render_step_stdout(
         return;
     }
 
-    let mut output = step.output.clone();
+    // Step output is raw process output — strip ANSI/control sequences or
+    // they repaint outside the pane and ghost across views.
+    let mut output = crate::log_processor::LogProcessor::strip_ansi(&step.output);
     if output.len() > 8000 {
-        output = format!("{}…[truncated]", &output[..8000]);
+        // Truncate on a char boundary — a fixed byte slice panics mid-UTF-8.
+        let mut end = 8000;
+        while !output.is_char_boundary(end) {
+            end -= 1;
+        }
+        output = format!("{}…[truncated]", &output[..end]);
     }
     let lines: Vec<Line> = output
         .split('\n')

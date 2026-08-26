@@ -152,6 +152,8 @@ fn render_jobs_pane(f: &mut Frame<'_>, app: &App, idx: usize, area: Rect) {
     let workflow = &app.workflows[idx];
     let exec = workflow.execution_details.as_ref();
 
+    app.mouse_zones.borrow_mut().jobs_rows = Some((inner_area, workflow.job_names.len()));
+
     // Synthesise full job list from workflow.job_names; jobs in `exec.jobs`
     // get their real status, the rest are pending (or running for the next slot).
     let mut lines: Vec<Line> = Vec::new();
@@ -296,6 +298,8 @@ fn render_live_output_pane(f: &mut Frame<'_>, app: &App, area: Rect) {
     let block = theme::block_focused(&title);
     let inner_area = block.inner(area);
     f.render_widget(block, area);
+
+    app.mouse_zones.borrow_mut().live_output = Some(inner_area);
 
     if app.processed_logs.is_empty() {
         f.render_widget(

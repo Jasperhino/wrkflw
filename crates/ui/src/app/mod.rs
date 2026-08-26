@@ -20,7 +20,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use wrkflw_executor::RuntimeType;
 
-pub use state::{Accent, App, TriggerPlatform};
+pub use state::{Accent, App, MouseZones, TriggerPlatform};
 
 // Main entry point for the TUI interface
 #[allow(clippy::ptr_arg)]
@@ -231,22 +231,95 @@ fn run_tui_event_loop(
         // Handle key events with a short timeout
         if event::poll(event_poll_timeout)? {
             let evt = event::read()?;
-            // Mouse wheel scrolls the live-output pane on the Execution tab
-            // and the log view on the Logs tab.
+            // Mouse support, routed through the hit-zones the last frame
+            // recorded: wheel scrolls the pane under the cursor (or moves
+            // the hovered list's selection); left-click switches tabs,
+            // selects rows, and cycles the runtime via its badge.
             if let Event::Mouse(mouse) = &evt {
+                use crate::app::state::MouseZones as Z;
+                let zones = app.mouse_zones.borrow().clone();
+                let (col, row) = (mouse.column, mouse.row);
+                let over = |r: Option<ratatui::layout::Rect>| {
+                    r.map(|r| Z::hit(r, col, row)).unwrap_or(false)
+                };
                 match mouse.kind {
-                    event::MouseEventKind::ScrollUp => {
-                        if app.selected_tab == TAB_EXECUTION {
-                            app.live_output_scroll_up(3);
-                        } else if app.selected_tab == TAB_LOGS {
-                            app.log_scroll = app.log_scroll.saturating_sub(3);
+                    event::MouseEventKind::ScrollUp | event::MouseEventKind::ScrollDown => {
+                        let up = matches!(mouse.kind, event::MouseEventKind::ScrollUp);
+                        if over(zones.live_output) {
+                            if up {
+                                app.live_output_scroll_up(3);
+                            } else {
+                                app.live_output_scroll_down(3);
+                            }
+                        } else if over(zones.logs) {
+                            if up {
+                                app.log_scroll = app.log_scroll.saturating_sub(3);
+                            } else {
+                                app.log_scroll = app.log_scroll.saturating_add(3);
+                            }
+                        } else if over(zones.jobs_rows.map(|(r, _)| r)) {
+                            if up {
+                                app.previous_job();
+                            } else {
+                                app.next_job();
+                            }
+                        } else if over(zones.step_rows.map(|(r, _)| r)) {
+                            if up {
+                                app.previous_step();
+                            } else {
+                                app.next_step();
+                            }
+                        } else if over(zones.workflow_rows.map(|(r, _, _)| r)) {
+                            if up {
+                                app.previous_workflow();
+                            } else {
+                                app.next_workflow();
+                            }
+                        } else if app.selected_tab == TAB_EXECUTION {
+                            // Fallback: anywhere else on the execution tab
+                            // scrolls the live output.
+                            if up {
+                                app.live_output_scroll_up(3);
+                            } else {
+                                app.live_output_scroll_down(3);
+                            }
                         }
                     }
-                    event::MouseEventKind::ScrollDown => {
-                        if app.selected_tab == TAB_EXECUTION {
-                            app.live_output_scroll_down(3);
-                        } else if app.selected_tab == TAB_LOGS {
-                            app.log_scroll = app.log_scroll.saturating_add(3);
+                    event::MouseEventKind::Down(event::MouseButton::Left) => {
+                        if let Some((tab, _)) =
+                            zones.tabs.iter().find(|(_, r)| Z::hit(*r, col, row))
+                        {
+                            app.switch_tab(*tab);
+                        } else if over(zones.runtime_badge) {
+                            if !app.running {
+                                app.toggle_emulation_mode();
+                            }
+                        } else if let Some((r, len)) = zones.jobs_rows {
+                            if Z::hit(r, col, row) {
+                                let idx = (row - r.y) as usize;
+                                if idx < len {
+                                    app.job_list_state.select(Some(idx));
+                                    app.step_list_state.select(Some(0));
+                                    app.step_table_state.select(Some(0));
+                                }
+                            }
+                        }
+                        if let Some((r, len)) = zones.step_rows {
+                            if Z::hit(r, col, row) {
+                                let idx = (row - r.y) as usize;
+                                if idx < len {
+                                    app.step_list_state.select(Some(idx));
+                                    app.step_table_state.select(Some(idx));
+                                }
+                            }
+                        }
+                        if let Some((r, offset, len)) = zones.workflow_rows {
+                            if Z::hit(r, col, row) {
+                                let idx = offset + (row - r.y) as usize;
+                                if idx < len {
+                                    app.workflow_list_state.select(Some(idx));
+                                }
+                            }
                         }
                     }
                     _ => {}

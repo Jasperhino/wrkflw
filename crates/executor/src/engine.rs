@@ -4313,6 +4313,7 @@ async fn execute_node_action_on_host(
     let mut cmd = tokio::process::Command::new("node");
     cmd.arg(&main_path);
     cmd.current_dir(ctx.working_dir);
+    cmd.stdin(std::process::Stdio::null());
     for (key, value) in &env {
         cmd.env(key, value);
     }

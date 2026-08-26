@@ -89,6 +89,25 @@ pub fn render_status_bar(f: &mut Frame<'_>, app: &App, area: Rect) {
         Style::default().fg(COLORS.text_muted),
     ));
 
+    // Right side is right-aligned; walk span widths to locate the runtime
+    // badge for click-to-cycle. Computed BEFORE `right` moves into the Line.
+    {
+        let total: u16 = right.iter().map(|sp| sp.width() as u16).sum();
+        let start_x = chunks[1]
+            .x
+            .saturating_add(chunks[1].width.saturating_sub(total));
+        // Spans: [validation chip, " ", runtime badge, ...]
+        if right.len() >= 3 {
+            let prefix: u16 = right[..2].iter().map(|sp| sp.width() as u16).sum();
+            let badge_w = right[2].width() as u16;
+            app.mouse_zones.borrow_mut().runtime_badge = Some(ratatui::layout::Rect {
+                x: start_x.saturating_add(prefix),
+                y: chunks[1].y,
+                width: badge_w,
+                height: 1,
+            });
+        }
+    }
     let right_p = Paragraph::new(Line::from(right))
         .style(Style::default().bg(COLORS.bg_bar))
         .alignment(Alignment::Right);

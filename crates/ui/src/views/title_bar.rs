@@ -59,8 +59,22 @@ pub fn render_title_bar(f: &mut Frame<'_>, app: &App, area: Rect) {
     // ─── Tabs ─────────────────────────────────────────────────
     let mut tab_spans: Vec<Span> = Vec::with_capacity(TAB_LABELS.len() * 4);
     tab_spans.push(Span::styled(" │ ", Style::default().fg(COLORS.border)));
+    // Track x while building spans so each tab label gets a click zone.
+    let mut tab_x = chunks[1].x + 3; // width of " │ "
+    let mut zones = app.mouse_zones.borrow_mut();
     for (i, label) in TAB_LABELS.iter().enumerate() {
         let active = i == app.selected_tab;
+        let tab_width = 2 + label.len() as u16; // "N " + label
+        zones.tabs.push((
+            i,
+            Rect {
+                x: tab_x,
+                y: chunks[1].y,
+                width: tab_width,
+                height: 1,
+            },
+        ));
+        tab_x += tab_width + 3; // "   " separator
         tab_spans.push(Span::styled(
             format!("{}", i + 1),
             Style::default().fg(COLORS.text_muted),
@@ -80,6 +94,7 @@ pub fn render_title_bar(f: &mut Frame<'_>, app: &App, area: Rect) {
             tab_spans.push(Span::raw("   "));
         }
     }
+    drop(zones);
     let tabs = Paragraph::new(Line::from(tab_spans))
         .style(Style::default().bg(COLORS.bg_dark))
         .alignment(Alignment::Left);
