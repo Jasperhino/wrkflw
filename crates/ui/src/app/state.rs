@@ -31,6 +31,9 @@ pub struct App {
     pub current_execution: Option<usize>,
     logs: Vec<String>, // Overall execution logs — private so every mutation routes through `add_log`
     pub log_scroll: usize, // Scrolling position for logs
+    /// Live-output pane scroll, measured in lines UP from the tail.
+    /// 0 = follow the stream (auto-scroll).
+    pub live_output_scroll: usize,
     pub job_list_state: ListState, // For viewing job details
     pub detailed_view: bool, // Whether we're in detailed view mode
     pub step_list_state: ListState, // For selecting steps in detailed view
@@ -500,6 +503,7 @@ impl App {
             current_execution: None,
             logs: Vec::new(),
             log_scroll: 0,
+            live_output_scroll: 0,
             job_list_state,
             detailed_view: false,
             step_list_state,
@@ -940,6 +944,22 @@ impl App {
         let msg = format!("Switched to {} mode", mode);
         self.add_timestamped_log(&msg);
         wrkflw_logging::info(&msg);
+    }
+
+    /// Scroll the execution tab's live-output pane up (away from the tail).
+    pub fn live_output_scroll_up(&mut self, lines: usize) {
+        let max = self.processed_logs.len().saturating_sub(1);
+        self.live_output_scroll = (self.live_output_scroll + lines).min(max);
+    }
+
+    /// Scroll the live-output pane back toward the tail; 0 resumes following.
+    pub fn live_output_scroll_down(&mut self, lines: usize) {
+        self.live_output_scroll = self.live_output_scroll.saturating_sub(lines);
+    }
+
+    /// Jump to the tail and resume following the stream.
+    pub fn live_output_follow(&mut self) {
+        self.live_output_scroll = 0;
     }
 
     pub fn runtime_type_name(&self) -> &str {

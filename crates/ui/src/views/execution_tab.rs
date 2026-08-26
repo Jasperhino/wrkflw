@@ -285,7 +285,15 @@ fn render_steps_pane(f: &mut Frame<'_>, workflow: &crate::models::Workflow, area
 
 // ─── Live output pane (centre bottom) ─────────────────────────────
 fn render_live_output_pane(f: &mut Frame<'_>, app: &App, area: Rect) {
-    let block = theme::block_focused("Live output");
+    let scroll = app
+        .live_output_scroll
+        .min(app.processed_logs.len().saturating_sub(1));
+    let title = if scroll > 0 {
+        format!("Live output — ↑{} (PgDn scroll · End follow)", scroll)
+    } else {
+        "Live output".to_string()
+    };
+    let block = theme::block_focused(&title);
     let inner_area = block.inner(area);
     f.render_widget(block, area);
 
@@ -300,10 +308,14 @@ fn render_live_output_pane(f: &mut Frame<'_>, app: &App, area: Rect) {
         return;
     }
 
-    // Take the last N lines that fit in the pane.
+    // Window of N lines ending `scroll` lines above the tail (0 = tail).
     let max_rows = inner_area.height as usize;
-    let start = app.processed_logs.len().saturating_sub(max_rows);
-    let lines: Vec<Line> = app.processed_logs[start..]
+    let total = app.processed_logs.len();
+    let visible = max_rows.min(total);
+    let max_scroll = total - visible;
+    let end = total - scroll.min(max_scroll);
+    let start = end - visible;
+    let lines: Vec<Line> = app.processed_logs[start..end]
         .iter()
         .map(|entry| {
             let mut spans: Vec<Span> = Vec::with_capacity(entry.content_spans.len() + 4);

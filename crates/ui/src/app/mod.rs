@@ -544,6 +544,23 @@ fn run_tui_event_loop(
                             );
                         }
                     }
+                    // Live-output pane scrolling (Execution tab). PgUp/PgDn
+                    // move through history; End resumes following the tail.
+                    KeyCode::PageUp => {
+                        if app.selected_tab == TAB_EXECUTION {
+                            app.live_output_scroll_up(10);
+                        }
+                    }
+                    KeyCode::PageDown => {
+                        if app.selected_tab == TAB_EXECUTION {
+                            app.live_output_scroll_down(10);
+                        }
+                    }
+                    KeyCode::End => {
+                        if app.selected_tab == TAB_EXECUTION {
+                            app.live_output_follow();
+                        }
+                    }
                     KeyCode::Char('?') => {
                         // Toggle help overlay
                         app.show_help = !app.show_help;
