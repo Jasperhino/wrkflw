@@ -78,10 +78,17 @@ impl ContainerRuntime for MicrosandboxRuntime {
             args.push(format!("{}={}", key, value));
         }
         for (host, container) in volumes {
-            args.push("--mount-dir".to_string());
+            let host = Self::canonical_host(host);
+            // msb distinguishes file mounts from directory mounts.
+            let flag = if host.is_file() {
+                "--mount-file"
+            } else {
+                "--mount-dir"
+            };
+            args.push(flag.to_string());
             args.push(format!(
                 "{}:{}",
-                Self::canonical_host(host).to_string_lossy(),
+                host.to_string_lossy(),
                 container.to_string_lossy()
             ));
         }

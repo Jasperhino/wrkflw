@@ -20,6 +20,16 @@ pub struct ProcessedLogEntry {
 }
 
 impl ProcessedLogEntry {
+    /// The entry as plain text — what a copy-to-clipboard should yield.
+    pub fn plain_text(&self) -> String {
+        let content: String = self
+            .content_spans
+            .iter()
+            .map(|sp| sp.content.as_ref())
+            .collect();
+        format!("{} {} {}", self.timestamp, self.log_type, content)
+    }
+
     /// Convert to a table row for rendering
     pub fn to_row(&self) -> Row<'static> {
         Row::new(vec![

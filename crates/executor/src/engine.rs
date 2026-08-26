@@ -4727,6 +4727,12 @@ fn get_runner_image_from_opt(runs_on: &Option<Vec<String>>) -> String {
     get_runner_image(ro)
 }
 
+/// The user's home directory from $HOME (unix-focused; fine for the local
+/// runner use case).
+fn dirs_home() -> Option<PathBuf> {
+    std::env::var("HOME").map(PathBuf::from).ok()
+}
+
 /// Image upgrades for the microsandbox runtime: minimal OCI bases lack
 /// shared libraries GitHub runner images always carry (pnpm's native binary
 /// needs libatomic, etc.). Upgrade plain ubuntu bases to the act runner
@@ -4901,6 +4907,39 @@ fn prepare_container_mounts(
                 "GITHUB_WORKSPACE".to_string(),
                 "/github/workspace".to_string(),
             );
+            // Opt-in (WRKFLW_MOUNT_ADC=true): mount the developer's
+            // Application Default Credentials read-only so GCS-backed cache
+            // actions work inside VMs. Off by default — the isolation
+            // runtime should not silently hand host credentials to
+            // untrusted workflows.
+            if std::env::var("WRKFLW_MOUNT_ADC").map(|v| v == "true").unwrap_or(false) {
+                let adc = std::env::var("GOOGLE_APPLICATION_CREDENTIALS")
+                    .map(PathBuf::from)
+                    .ok()
+                    .filter(|p| p.exists())
+                    .or_else(|| {
+                        dirs_home().map(|h| {
+                            h.join(".config/gcloud/application_default_credentials.json")
+                        })
+                        .filter(|p| p.exists())
+                    });
+                if let Some(adc_path) = adc {
+                    owned_volume_paths
+                        .push((adc_path, PathBuf::from("/github/adc/credentials.json")));
+                    step_env.insert(
+                        "GOOGLE_APPLICATION_CREDENTIALS".to_string(),
+                        "/github/adc/credentials.json".to_string(),
+                    );
+                    wrkflw_logging::info(
+                        "microsandbox: mounting host ADC into the VM (WRKFLW_MOUNT_ADC=true)",
+                    );
+                } else {
+                    wrkflw_logging::warning(
+                        "WRKFLW_MOUNT_ADC=true but no ADC found — run `gcloud auth application-default login`",
+                    );
+                }
+            }
+
             // The guest is a Linux microVM at the host's architecture —
             // host-seeded values (e.g. macOS) would make setup actions
             // download binaries for the wrong platform.

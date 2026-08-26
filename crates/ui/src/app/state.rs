@@ -37,6 +37,41 @@ pub struct MouseZones {
     pub logs: Option<ratatui::layout::Rect>,
     /// Runtime badge in the status bar (click cycles the runtime).
     pub runtime_badge: Option<ratatui::layout::Rect>,
+    /// Logs tab data rows: (rows rect, viewport offset into processed_logs).
+    pub logs_window: Option<(ratatui::layout::Rect, usize)>,
+    /// Live-output pane: (inner rect, content index of the first visible line).
+    pub live_window: Option<(ratatui::layout::Rect, usize)>,
+}
+
+/// Which copyable pane a drag-selection is happening in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CopyPane {
+    Logs,
+    Live,
+}
+
+/// Minimal standard base64 (RFC 4648, with padding) — only used for the
+/// OSC 52 clipboard payload; not worth a dependency.
+pub(crate) fn base64_encode(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 impl MouseZones {
@@ -69,6 +104,8 @@ pub struct App {
     pub force_clear: bool,
     /// Mouse hit-zones recorded by the last rendered frame.
     pub mouse_zones: std::cell::RefCell<MouseZones>,
+    /// In-flight drag selection: (pane, anchor content idx, current content idx).
+    pub drag_copy: Option<(CopyPane, usize, usize)>,
     pub job_list_state: ListState, // For viewing job details
     pub detailed_view: bool, // Whether we're in detailed view mode
     pub step_list_state: ListState, // For selecting steps in detailed view
@@ -541,6 +578,7 @@ impl App {
             live_output_scroll: 0,
             force_clear: false,
             mouse_zones: std::cell::RefCell::new(MouseZones::default()),
+            drag_copy: None,
             job_list_state,
             detailed_view: false,
             step_list_state,
@@ -997,6 +1035,32 @@ impl App {
     /// Jump to the tail and resume following the stream.
     pub fn live_output_follow(&mut self) {
         self.live_output_scroll = 0;
+    }
+
+    /// The inclusive content-index range of the current drag selection in
+    /// `pane`, if any.
+    pub fn drag_range(&self, pane: CopyPane) -> Option<(usize, usize)> {
+        match self.drag_copy {
+            Some((p, a, b)) if p == pane => Some((a.min(b), a.max(b))),
+            _ => None,
+        }
+    }
+
+    /// Copy `text` to the system clipboard via OSC 52 (terminal-native, so
+    /// it works locally and over ssh in any modern emulator) and surface
+    /// feedback in the app log.
+    pub fn copy_to_clipboard(&mut self, text: &str, lines: usize) {
+        use std::io::Write;
+        let encoded = base64_encode(text.as_bytes());
+        let seq = format!("\x1b]52;c;{}\x07", encoded);
+        let mut stdout = std::io::stdout();
+        let _ = stdout.write_all(seq.as_bytes());
+        let _ = stdout.flush();
+        self.add_timestamped_log(&format!(
+            "Copied {} line{} to clipboard",
+            lines,
+            if lines == 1 { "" } else { "s" }
+        ));
     }
 
     pub fn runtime_type_name(&self) -> &str {

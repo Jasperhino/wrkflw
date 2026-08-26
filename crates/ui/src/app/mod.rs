@@ -20,7 +20,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use wrkflw_executor::RuntimeType;
 
-pub use state::{Accent, App, MouseZones, TriggerPlatform};
+pub use state::{Accent, App, CopyPane, MouseZones, TriggerPlatform};
 
 // Main entry point for the TUI interface
 #[allow(clippy::ptr_arg)]
@@ -242,7 +242,47 @@ fn run_tui_event_loop(
                 let over = |r: Option<ratatui::layout::Rect>| {
                     r.map(|r| Z::hit(r, col, row)).unwrap_or(false)
                 };
+                // Content index under the cursor for a copyable pane.
+                let copy_target = |zones: &Z| -> Option<(crate::app::CopyPane, usize)> {
+                    if let Some((r, offset)) = zones.logs_window {
+                        if Z::hit(r, col, row) {
+                            return Some((crate::app::CopyPane::Logs, offset + (row - r.y) as usize));
+                        }
+                    }
+                    if let Some((r, start)) = zones.live_window {
+                        if Z::hit(r, col, row) {
+                            return Some((crate::app::CopyPane::Live, start + (row - r.y) as usize));
+                        }
+                    }
+                    None
+                };
                 match mouse.kind {
+                    event::MouseEventKind::Drag(event::MouseButton::Left) => {
+                        if let (Some((pane, _, _)), Some((p2, idx))) =
+                            (app.drag_copy, copy_target(&zones))
+                        {
+                            if pane == p2 {
+                                if let Some((_, a, _)) = app.drag_copy {
+                                    app.drag_copy = Some((pane, a, idx));
+                                }
+                            }
+                        }
+                    }
+                    event::MouseEventKind::Up(event::MouseButton::Left) => {
+                        if let Some((pane, a, b)) = app.drag_copy.take() {
+                            let (lo, hi) = (a.min(b), a.max(b));
+                            let hi = hi.min(app.processed_logs.len().saturating_sub(1));
+                            if lo <= hi && !app.processed_logs.is_empty() {
+                                let text: String = app.processed_logs[lo..=hi]
+                                    .iter()
+                                    .map(|e| e.plain_text())
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                app.copy_to_clipboard(&text, hi - lo + 1);
+                            }
+                            let _ = pane;
+                        }
+                    }
                     event::MouseEventKind::ScrollUp | event::MouseEventKind::ScrollDown => {
                         let up = matches!(mouse.kind, event::MouseEventKind::ScrollUp);
                         if over(zones.live_output) {
@@ -286,6 +326,10 @@ fn run_tui_event_loop(
                         }
                     }
                     event::MouseEventKind::Down(event::MouseButton::Left) => {
+                        // Selecting text in a log pane: anchor a drag-copy.
+                        if let Some((pane, idx)) = copy_target(&zones) {
+                            app.drag_copy = Some((pane, idx, idx));
+                        }
                         if let Some((tab, _)) =
                             zones.tabs.iter().find(|(_, r)| Z::hit(*r, col, row))
                         {
@@ -505,6 +549,18 @@ fn run_tui_event_loop(
                             && !app.job_selection_mode
                         {
                             app.toggle_selected();
+                        }
+                    }
+                    // Right on a job behaves like Enter (open its steps);
+                    // Left backs out of the steps view.
+                    KeyCode::Right => {
+                        if app.selected_tab == TAB_EXECUTION && !app.detailed_view {
+                            app.toggle_detailed_view();
+                        }
+                    }
+                    KeyCode::Left => {
+                        if app.selected_tab == TAB_EXECUTION && app.detailed_view {
+                            app.detailed_view = false;
                         }
                     }
                     KeyCode::Enter => {

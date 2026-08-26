@@ -319,9 +319,13 @@ fn render_live_output_pane(f: &mut Frame<'_>, app: &App, area: Rect) {
     let max_scroll = total - visible;
     let end = total - scroll.min(max_scroll);
     let start = end - visible;
+    app.mouse_zones.borrow_mut().live_window = Some((inner_area, start));
+    let drag = app.drag_range(crate::app::CopyPane::Live);
     let lines: Vec<Line> = app.processed_logs[start..end]
         .iter()
-        .map(|entry| {
+        .enumerate()
+        .map(|(pos, entry)| {
+            let selected = matches!(drag, Some((lo, hi)) if start + pos >= lo && start + pos <= hi);
             let mut spans: Vec<Span> = Vec::with_capacity(entry.content_spans.len() + 4);
             spans.push(Span::styled(
                 entry.timestamp.clone(),
@@ -331,7 +335,12 @@ fn render_live_output_pane(f: &mut Frame<'_>, app: &App, area: Rect) {
             spans.push(Span::styled(entry.log_type.clone(), entry.log_style));
             spans.push(Span::raw(" "));
             spans.extend(entry.content_spans.iter().cloned());
-            Line::from(spans)
+            let line = Line::from(spans);
+            if selected {
+                line.style(theme::selected_style())
+            } else {
+                line
+            }
         })
         .collect();
 

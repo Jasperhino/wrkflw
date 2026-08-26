@@ -90,9 +90,14 @@ pub fn render_logs_tab(f: &mut Frame<'_>, app: &App, area: Rect) {
 
     let header = Row::new(header_cells).height(1);
 
-    let rows = filtered_logs
-        .iter()
-        .map(|processed_log| processed_log.to_row());
+    let drag = app.drag_range(crate::app::CopyPane::Logs);
+    let rows = filtered_logs.iter().enumerate().map(|(i, processed_log)| {
+        let row = processed_log.to_row();
+        match drag {
+            Some((lo, hi)) if i >= lo && i <= hi => row.style(theme::selected_style()),
+            _ => row,
+        }
+    });
 
     let content_idx = if show_search_bar { 1 } else { 0 };
 
@@ -124,4 +129,17 @@ pub fn render_logs_tab(f: &mut Frame<'_>, app: &App, area: Rect) {
 
     app.mouse_zones.borrow_mut().logs = Some(chunks[content_idx]);
     f.render_stateful_widget(log_table, chunks[content_idx], &mut log_table_state);
+    // Data rows sit below the block border (1) and header (1); the state's
+    // offset after render is the real viewport scroll — both recorded for
+    // drag-to-copy hit-testing.
+    let a = chunks[content_idx];
+    if a.height > 3 && a.width > 2 {
+        let rows_rect = ratatui::layout::Rect {
+            x: a.x + 1,
+            y: a.y + 2,
+            width: a.width - 2,
+            height: a.height - 3,
+        };
+        app.mouse_zones.borrow_mut().logs_window = Some((rows_rect, log_table_state.offset()));
+    }
 }
