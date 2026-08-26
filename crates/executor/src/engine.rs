@@ -3235,10 +3235,12 @@ async fn execute_step(ctx: StepExecutionContext<'_>) -> Result<StepResult, Execu
         let action_info = ctx.workflow.resolve_action(uses);
 
         // Checkout-family actions: `actions/checkout` and org forks that wrap
-        // it (e.g. `MyOrg/checkout`). A same-repo checkout copies the
-        // workflow's project tree — the local-first semantics act uses. A
-        // cross-repository checkout (`with.repository`) is a real shallow
-        // clone; GITHUB_TOKEN is used so private repositories resolve.
+        // it (e.g. `MyOrg/checkout`). ALWAYS emulated locally — the real
+        // action clones from GitHub into `github.workspace`, which in
+        // emulation is not the job workspace, and it would lose the local
+        // working tree (act bind-mounts for the same reason). Same-repo
+        // checkouts copy the workflow's project tree, cross-repo checkouts
+        // shallow-clone.
         if is_checkout_like(uses) {
             let with = ctx.step.with.as_ref();
             let non_empty = |key: &str| {
@@ -3457,6 +3459,24 @@ async fn execute_step(ctx: StepExecutionContext<'_>) -> Result<StepResult, Execu
                     .await?
                 }
                 PreparedAction::Image(image) => {
+                    // Emulation executes resolvable Node actions FOR REAL on
+                    // the host — the point of a local run is exercising the
+                    // actual actions (checkout/cache forks included). Docker
+                    // mode keeps the container behavior.
+                    let runtime_mode = ctx
+                        .job_env
+                        .get("WRKFLW_RUNTIME_MODE")
+                        .or_else(|| step_env.get("WRKFLW_RUNTIME_MODE"))
+                        .cloned()
+                        .unwrap_or_default();
+                    if runtime_mode == "emulation" || runtime_mode == "secure_emulation" {
+                        if let Some((status, output)) =
+                            execute_node_action_on_host(&ctx, &step_env, &action_info).await?
+                        {
+                            return Ok(StepResult::new(step_name, status, output));
+                        }
+                    }
+
                     // Build command for Docker action
                     let mut cmd = Vec::new();
                     let mut owned_strings: Vec<String> = Vec::new(); // Keep strings alive until after we use cmd
@@ -4048,6 +4068,188 @@ async fn execute_step(ctx: StepExecutionContext<'_>) -> Result<StepResult, Execu
     };
 
     Ok(step_result)
+}
+
+/// Execute a resolvable Node.js action FOR REAL on the host (emulation
+/// mode): clone the action at its ref, resolve its inputs (step `with`
+/// values plus action.yml defaults), and run `node <runs.main>` against the
+/// job's runner files (GITHUB_OUTPUT / GITHUB_ENV / GITHUB_PATH). Returns
+/// Ok(None) when the step is not a remote Node action — the caller falls
+/// back to the legacy path.
+async fn execute_node_action_on_host(
+    ctx: &StepExecutionContext<'_>,
+    step_env: &HashMap<String, String>,
+    action_info: &ActionInfo,
+) -> Result<Option<(StepStatus, String)>, ExecutionError> {
+    if action_info.is_local
+        || action_info.is_docker
+        || action_info.repository.is_empty()
+        || action_info.version.is_empty()
+    {
+        return Ok(None);
+    }
+    let resolved = match action_resolver::resolve_remote_action(
+        &action_info.repository,
+        &action_info.version,
+        action_info.sub_path.as_deref(),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(_) => return Ok(None),
+    };
+    if !matches!(
+        resolved.action_type,
+        action_resolver::ActionType::Node { .. }
+    ) {
+        return Ok(None);
+    }
+    let Some(definition) = resolved.definition.as_ref() else {
+        return Ok(None);
+    };
+    let Some(main_rel) = definition
+        .get("runs")
+        .and_then(|r| r.get("main"))
+        .and_then(|m| m.as_str())
+    else {
+        return Ok(None);
+    };
+
+    // Clone the action source at its ref. GITHUB_TOKEN makes private actions
+    // fetchable; it is redacted from anything surfaced to the user.
+    let token = std::env::var("GITHUB_TOKEN").ok().filter(|t| !t.is_empty());
+    let url = match &token {
+        Some(t) => format!(
+            "https://x-access-token:{}@github.com/{}.git",
+            t, action_info.repository
+        ),
+        None => format!("https://github.com/{}.git", action_info.repository),
+    };
+    let redact = |msg: String| match &token {
+        Some(t) => msg.replace(t.as_str(), "***"),
+        None => msg,
+    };
+    let tempdir = tempfile::tempdir()
+        .map_err(|e| ExecutionError::Execution(format!("Failed to create temp dir: {}", e)))?;
+    let repo_dir = tempdir.path().join("action");
+    shallow_clone(&url, &action_info.version, &repo_dir)
+        .await
+        .map_err(|e| {
+            ExecutionError::Execution(redact(format!(
+                "Failed to fetch action '{}': {}",
+                action_info.repository, e
+            )))
+        })?;
+    let action_dir = match &action_info.sub_path {
+        Some(sub) => {
+            sanitize_sub_path(sub).map_err(|e| {
+                ExecutionError::Execution(format!(
+                    "Invalid sub_path for action '{}': {}",
+                    action_info.repository, e
+                ))
+            })?;
+            repo_dir.join(sub)
+        }
+        None => repo_dir.clone(),
+    };
+    let main_path = action_dir.join(main_rel);
+    if !main_path.exists() {
+        return Err(ExecutionError::Execution(format!(
+            "Action '{}' entrypoint '{}' not found after checkout",
+            action_info.repository, main_rel
+        )));
+    }
+
+    // Inputs: the step's `with` wins, action.yml defaults fill the rest.
+    // GitHub exposes them as INPUT_<name uppercased, spaces to underscores>.
+    let mut env: HashMap<String, String> = step_env.clone();
+    let input_key = |name: &str| format!("INPUT_{}", name.to_uppercase().replace(' ', "_"));
+    if let Some(with) = &ctx.step.with {
+        for (key, value) in with {
+            env.insert(input_key(key), preprocess_with_value(value, ctx));
+        }
+    }
+    if let Some(inputs) = definition.get("inputs").and_then(|i| i.as_mapping()) {
+        for (name, spec) in inputs {
+            let Some(name) = name.as_str() else { continue };
+            let key = input_key(name);
+            if env.contains_key(&key) {
+                continue;
+            }
+            let Some(default) = spec.get("default") else {
+                continue;
+            };
+            let raw = match default {
+                serde_yaml::Value::String(v) => v.clone(),
+                other => serde_yaml::to_string(other)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+            };
+            let mut value = preprocess_with_value(&raw, ctx);
+            // `${{ github.token }}` has no local equivalent — substitute the
+            // developer's GITHUB_TOKEN so checkout-style actions can reach
+            // GitHub with their own credentials.
+            if value.trim().is_empty() && raw.contains("github.token") {
+                if let Some(t) = &token {
+                    value = t.clone();
+                }
+            }
+            env.insert(key, value);
+        }
+    }
+    // Toolchain actions expect the runner directories to exist.
+    for (key, dir_name) in [
+        ("RUNNER_TEMP", "wrkflw-runner-temp"),
+        ("RUNNER_TOOL_CACHE", "wrkflw-tool-cache"),
+    ] {
+        if !env.contains_key(key) {
+            let dir = std::env::temp_dir().join(dir_name);
+            let _ = std::fs::create_dir_all(&dir);
+            env.insert(key.to_string(), dir.to_string_lossy().to_string());
+        }
+    }
+
+    if definition
+        .get("runs")
+        .and_then(|r| r.get("pre"))
+        .is_some()
+    {
+        wrkflw_logging::debug(&format!(
+            "Action '{}' declares a pre step — not executed in emulation",
+            action_info.repository
+        ));
+    }
+
+    wrkflw_logging::info(&format!(
+        "Executing Node action '{}@{}' on the host",
+        action_info.repository, action_info.version
+    ));
+    let mut cmd = tokio::process::Command::new("node");
+    cmd.arg(&main_path);
+    cmd.current_dir(ctx.working_dir);
+    for (key, value) in &env {
+        cmd.env(key, value);
+    }
+    let output = cmd.output().await.map_err(|e| {
+        ExecutionError::Execution(format!(
+            "Failed to execute node for action '{}': {}",
+            action_info.repository, e
+        ))
+    })?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let status = if output.status.success() {
+        StepStatus::Success
+    } else {
+        StepStatus::Failure
+    };
+    let mut combined = stdout;
+    if !stderr.is_empty() {
+        combined.push_str("\n");
+        combined.push_str(&stderr);
+    }
+    Ok(Some((status, redact(combined))))
 }
 
 /// `actions/checkout` or an org fork wrapping it (`<owner>/checkout`).

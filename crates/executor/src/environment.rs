@@ -82,11 +82,10 @@ pub fn create_github_context(
 
     // CI detection variables
     env.insert("GITHUB_ACTIONS".to_string(), "true".to_string());
-    // Local-runner convention (act popularised it): workflows guard steps
-    // that cannot work locally — OIDC auth, cache writes — with
-    // `if: ${{ !env.ACT }}`. Honour that convention, and set WRKFLW for
-    // anyone who wants to target this runner specifically.
-    env.insert("ACT".to_string(), "true".to_string());
+    // Deliberately NOT setting ACT: wrkflw emulates as close to the real
+    // run as possible, so act-guarded steps (`if: ${{ !env.ACT }}`) execute
+    // here. Workflows that want to skip steps under wrkflw specifically can
+    // guard on WRKFLW instead.
     env.insert("WRKFLW".to_string(), "true".to_string());
     env.insert("CI".to_string(), "true".to_string());
 
