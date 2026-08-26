@@ -660,6 +660,9 @@ fn run_tui_event_loop(
                             app.toggle_emulation_mode();
                         }
                     }
+                    KeyCode::Char('m') => {
+                        app.toggle_adc_mount();
+                    }
                     KeyCode::Char('v') => {
                         if !app.running {
                             app.toggle_validation_mode();

@@ -1032,6 +1032,30 @@ impl App {
         self.live_output_scroll = self.live_output_scroll.saturating_sub(lines);
     }
 
+    /// Whether host ADC mounting into microVMs is currently enabled.
+    pub fn adc_mount_enabled(&self) -> bool {
+        std::env::var("WRKFLW_MOUNT_ADC").map(|v| v == "true").unwrap_or(false)
+    }
+
+    /// Toggle mounting the host's Application Default Credentials into
+    /// microsandbox VMs (the engine reads WRKFLW_MOUNT_ADC per step).
+    /// Only allowed while no run is in flight.
+    pub fn toggle_adc_mount(&mut self) {
+        if self.running {
+            self.add_timestamped_log("Cannot toggle ADC mounting during a run");
+            return;
+        }
+        if self.adc_mount_enabled() {
+            std::env::set_var("WRKFLW_MOUNT_ADC", "false");
+            self.add_timestamped_log("ADC mounting into microVMs: OFF");
+        } else {
+            std::env::set_var("WRKFLW_MOUNT_ADC", "true");
+            self.add_timestamped_log(
+                "ADC mounting into microVMs: ON — host Google credentials will be visible to workflows",
+            );
+        }
+    }
+
     /// Jump to the tail and resume following the stream.
     pub fn live_output_follow(&mut self) {
         self.live_output_scroll = 0;

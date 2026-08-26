@@ -61,6 +61,10 @@ pub fn render_status_bar(f: &mut Frame<'_>, app: &App, area: Rect) {
         right.push(theme::badge_outline("execution", BadgeKind::Success));
     }
     right.push(Span::raw(" "));
+    if app.adc_mount_enabled() {
+        right.push(theme::badge_outline("ADC", BadgeKind::Warning));
+        right.push(Span::raw(" "));
+    }
     let runtime_badge_kind = match app.runtime_type {
         RuntimeType::Auto => BadgeKind::Emulation,
         RuntimeType::Docker => BadgeKind::Docker,
@@ -96,10 +100,13 @@ pub fn render_status_bar(f: &mut Frame<'_>, app: &App, area: Rect) {
         let start_x = chunks[1]
             .x
             .saturating_add(chunks[1].width.saturating_sub(total));
-        // Spans: [validation chip, " ", runtime badge, ...]
-        if right.len() >= 3 {
-            let prefix: u16 = right[..2].iter().map(|sp| sp.width() as u16).sum();
-            let badge_w = right[2].width() as u16;
+        // The runtime badge sits 5 spans from the end ([badge, " ", dot,
+        // " ", workflows]) — counted from the tail so optional leading chips
+        // (ADC) cannot shift it.
+        if right.len() >= 5 {
+            let badge_idx = right.len() - 5;
+            let prefix: u16 = right[..badge_idx].iter().map(|sp| sp.width() as u16).sum();
+            let badge_w = right[badge_idx].width() as u16;
             app.mouse_zones.borrow_mut().runtime_badge = Some(ratatui::layout::Rect {
                 x: start_x.saturating_add(prefix),
                 y: chunks[1].y,
