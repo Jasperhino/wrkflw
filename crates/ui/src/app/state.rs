@@ -41,6 +41,11 @@ pub struct MouseZones {
     pub logs_window: Option<(ratatui::layout::Rect, usize)>,
     /// Live-output pane: (inner rect, content index of the first visible line).
     pub live_window: Option<(ratatui::layout::Rect, usize)>,
+    /// Step-inspector stdout: (inner rect, index of first visible wrapped line).
+    pub step_output_window: Option<(ratatui::layout::Rect, usize)>,
+    /// The step-inspector stdout as display-wrapped lines (drag-copy source;
+    /// bounded by the pane's 8000-char output cap).
+    pub step_output_lines: Vec<String>,
 }
 
 /// Which copyable pane a drag-selection is happening in.
@@ -48,6 +53,7 @@ pub struct MouseZones {
 pub enum CopyPane {
     Logs,
     Live,
+    StepOutput,
 }
 
 /// Minimal standard base64 (RFC 4648, with padding) — only used for the
@@ -106,6 +112,8 @@ pub struct App {
     pub mouse_zones: std::cell::RefCell<MouseZones>,
     /// In-flight drag selection: (pane, anchor content idx, current content idx).
     pub drag_copy: Option<(CopyPane, usize, usize)>,
+    /// Step-inspector stdout scroll, in wrapped lines from the top.
+    pub step_output_scroll: usize,
     pub job_list_state: ListState, // For viewing job details
     pub detailed_view: bool, // Whether we're in detailed view mode
     pub step_list_state: ListState, // For selecting steps in detailed view
@@ -579,6 +587,7 @@ impl App {
             force_clear: false,
             mouse_zones: std::cell::RefCell::new(MouseZones::default()),
             drag_copy: None,
+            step_output_scroll: 0,
             job_list_state,
             detailed_view: false,
             step_list_state,
@@ -1232,6 +1241,7 @@ impl App {
                 self.step_list_state.select(Some(i));
                 // Update the table state to match
                 self.step_table_state.select(Some(i));
+                self.step_output_scroll = 0;
             }
         }
     }
@@ -1270,6 +1280,7 @@ impl App {
                         self.step_list_state.select(Some(i));
                         // Update the table state to match
                         self.step_table_state.select(Some(i));
+                        self.step_output_scroll = 0;
                     }
                 }
             }

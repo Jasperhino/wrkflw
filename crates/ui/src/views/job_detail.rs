@@ -161,7 +161,7 @@ fn render_output_pane(
         .split(area);
 
     render_steps_list(f, app, job, selected_step, cols[0]);
-    render_step_stdout(f, job, selected_step, cols[1]);
+    render_step_stdout(f, app, job, selected_step, cols[1]);
 }
 
 fn render_steps_list(
@@ -211,6 +211,7 @@ fn render_steps_list(
 
 fn render_step_stdout(
     f: &mut Frame<'_>,
+    app: &App,
     job: &crate::models::JobExecution,
     selected: Option<usize>,
     area: Rect,
@@ -256,17 +257,53 @@ fn render_step_stdout(
         }
         output = format!("{}…[truncated]", &output[..end]);
     }
-    let lines: Vec<Line> = output
+
+    // Wrap manually instead of Paragraph::wrap: each rendered row then maps
+    // 1:1 onto an entry we control, which is what makes drag-to-copy and
+    // wheel scrolling possible in this pane.
+    let width = inner_area.width.max(1) as usize;
+    let wrapped: Vec<String> = output
         .split('\n')
-        .map(|l| {
-            Line::from(Span::styled(
-                l.to_string(),
-                Style::default().fg(COLORS.text_dim),
-            ))
+        .flat_map(|l| {
+            let chars: Vec<char> = l.chars().collect();
+            if chars.is_empty() {
+                vec![String::new()]
+            } else {
+                chars
+                    .chunks(width)
+                    .map(|c| c.iter().collect::<String>())
+                    .collect::<Vec<_>>()
+            }
         })
         .collect();
 
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner_area);
+    let max_rows = inner_area.height as usize;
+    let total = wrapped.len();
+    let scroll = app
+        .step_output_scroll
+        .min(total.saturating_sub(max_rows.min(total)));
+    let end = (scroll + max_rows).min(total);
+    let drag = app.drag_range(crate::app::CopyPane::StepOutput);
+    let lines: Vec<Line> = wrapped[scroll..end]
+        .iter()
+        .enumerate()
+        .map(|(pos, l)| {
+            let idx = scroll + pos;
+            let style = match drag {
+                Some((lo, hi)) if idx >= lo && idx <= hi => theme::selected_style(),
+                _ => Style::default().fg(COLORS.text_dim),
+            };
+            Line::from(Span::styled(l.clone(), style))
+        })
+        .collect();
+
+    {
+        let mut zones = app.mouse_zones.borrow_mut();
+        zones.step_output_window = Some((inner_area, scroll));
+        zones.step_output_lines = wrapped;
+    }
+
+    f.render_widget(Paragraph::new(lines), inner_area);
 }
 
 // ─── Env pane (placeholder) ───────────────────────────────────────

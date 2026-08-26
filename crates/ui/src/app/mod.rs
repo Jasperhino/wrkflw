@@ -254,6 +254,14 @@ fn run_tui_event_loop(
                             return Some((crate::app::CopyPane::Live, start + (row - r.y) as usize));
                         }
                     }
+                    if let Some((r, start)) = zones.step_output_window {
+                        if Z::hit(r, col, row) {
+                            return Some((
+                                crate::app::CopyPane::StepOutput,
+                                start + (row - r.y) as usize,
+                            ));
+                        }
+                    }
                     None
                 };
                 match mouse.kind {
@@ -271,21 +279,35 @@ fn run_tui_event_loop(
                     event::MouseEventKind::Up(event::MouseButton::Left) => {
                         if let Some((pane, a, b)) = app.drag_copy.take() {
                             let (lo, hi) = (a.min(b), a.max(b));
-                            let hi = hi.min(app.processed_logs.len().saturating_sub(1));
-                            if lo <= hi && !app.processed_logs.is_empty() {
-                                let text: String = app.processed_logs[lo..=hi]
-                                    .iter()
-                                    .map(|e| e.plain_text())
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
-                                app.copy_to_clipboard(&text, hi - lo + 1);
+                            if pane == crate::app::CopyPane::StepOutput {
+                                let lines = &zones.step_output_lines;
+                                let hi = hi.min(lines.len().saturating_sub(1));
+                                if lo <= hi && !lines.is_empty() {
+                                    let text = lines[lo..=hi].join("\n");
+                                    app.copy_to_clipboard(&text, hi - lo + 1);
+                                }
+                            } else {
+                                let hi = hi.min(app.processed_logs.len().saturating_sub(1));
+                                if lo <= hi && !app.processed_logs.is_empty() {
+                                    let text: String = app.processed_logs[lo..=hi]
+                                        .iter()
+                                        .map(|e| e.plain_text())
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    app.copy_to_clipboard(&text, hi - lo + 1);
+                                }
                             }
-                            let _ = pane;
                         }
                     }
                     event::MouseEventKind::ScrollUp | event::MouseEventKind::ScrollDown => {
                         let up = matches!(mouse.kind, event::MouseEventKind::ScrollUp);
-                        if over(zones.live_output) {
+                        if over(zones.step_output_window.map(|(r, _)| r)) {
+                            if up {
+                                app.step_output_scroll = app.step_output_scroll.saturating_sub(3);
+                            } else {
+                                app.step_output_scroll = app.step_output_scroll.saturating_add(3);
+                            }
+                        } else if over(zones.live_output) {
                             if up {
                                 app.live_output_scroll_up(3);
                             } else {
