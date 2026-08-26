@@ -34,6 +34,8 @@ pub struct App {
     /// Live-output pane scroll, measured in lines UP from the tail.
     /// 0 = follow the stream (auto-scroll).
     pub live_output_scroll: usize,
+    /// Request a full terminal clear before the next frame (tab switches).
+    pub force_clear: bool,
     pub job_list_state: ListState, // For viewing job details
     pub detailed_view: bool, // Whether we're in detailed view mode
     pub step_list_state: ListState, // For selecting steps in detailed view
@@ -504,6 +506,7 @@ impl App {
             logs: Vec::new(),
             log_scroll: 0,
             live_output_scroll: 0,
+            force_clear: false,
             job_list_state,
             detailed_view: false,
             step_list_state,
@@ -1153,6 +1156,8 @@ impl App {
 
     // Change the tab.
     pub fn switch_tab(&mut self, tab: usize) {
+        // Full clear on tab change — see the draw loop.
+        self.force_clear = true;
         self.selected_tab = tab;
     }
 

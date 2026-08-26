@@ -178,6 +178,13 @@ fn run_tui_event_loop(
     let mut last_tick = Instant::now();
 
     loop {
+        // A tab switch (or any full-frame invalidation) clears the terminal
+        // first: stray escape output that slipped past sanitization must not
+        // ghost into the next tab's frame.
+        if app.force_clear {
+            terminal.clear()?;
+            app.force_clear = false;
+        }
         // Always redraw the UI on each loop iteration to keep it responsive
         terminal.draw(|f| {
             render_ui(f, app);
@@ -223,7 +230,30 @@ fn run_tui_event_loop(
 
         // Handle key events with a short timeout
         if event::poll(event_poll_timeout)? {
-            if let Event::Key(key) = event::read()? {
+            let evt = event::read()?;
+            // Mouse wheel scrolls the live-output pane on the Execution tab
+            // and the log view on the Logs tab.
+            if let Event::Mouse(mouse) = &evt {
+                match mouse.kind {
+                    event::MouseEventKind::ScrollUp => {
+                        if app.selected_tab == TAB_EXECUTION {
+                            app.live_output_scroll_up(3);
+                        } else if app.selected_tab == TAB_LOGS {
+                            app.log_scroll = app.log_scroll.saturating_sub(3);
+                        }
+                    }
+                    event::MouseEventKind::ScrollDown => {
+                        if app.selected_tab == TAB_EXECUTION {
+                            app.live_output_scroll_down(3);
+                        } else if app.selected_tab == TAB_LOGS {
+                            app.log_scroll = app.log_scroll.saturating_add(3);
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            if let Event::Key(key) = evt {
                 // Handle search input first if we're in search mode and logs tab
                 if app.selected_tab == TAB_LOGS && app.log_search_active {
                     app.handle_log_search_input(key.code);

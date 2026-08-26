@@ -196,8 +196,62 @@ impl LogProcessor {
         }
     }
 
+    /// Strip ANSI escape sequences (CSI, OSC) and stray control characters.
+    ///
+    /// Step output from REAL action executions carries color codes, cursor
+    /// movement, and occasionally raw mouse-report fragments; rendered
+    /// verbatim through ratatui they escape the pane and corrupt the frame
+    /// (artifacts that persist across tab switches).
+    pub(crate) fn strip_ansi(input: &str) -> String {
+        let mut out = String::with_capacity(input.len());
+        let mut chars = input.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                match chars.peek() {
+                    // CSI: ESC [ ... final byte in @..~
+                    Some('[') => {
+                        chars.next();
+                        for f in chars.by_ref() {
+                            if ('\u{40}'..='\u{7e}').contains(&f) {
+                                break;
+                            }
+                        }
+                    }
+                    // OSC: ESC ] ... terminated by BEL or ESC \
+                    Some(']') => {
+                        chars.next();
+                        while let Some(f) = chars.next() {
+                            if f == '\u{7}' {
+                                break;
+                            }
+                            if f == '\u{1b}' {
+                                if chars.peek() == Some(&'\\') {
+                                    chars.next();
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    // Two-char escapes (ESC c, ESC 7, ...)
+                    Some(_) => {
+                        chars.next();
+                    }
+                    None => {}
+                }
+                continue;
+            }
+            if c.is_control() && c != '\t' {
+                continue;
+            }
+            out.push(c);
+        }
+        out
+    }
+
     /// Process a single log entry into display format
-    pub(crate) fn process_log_entry(log_line: &str, search_query: &str) -> ProcessedLogEntry {
+    pub(crate) fn process_log_entry(raw_log_line: &str, search_query: &str) -> ProcessedLogEntry {
+        let sanitized = Self::strip_ansi(raw_log_line);
+        let log_line: &str = &sanitized;
         // Extract timestamp from log format [HH:MM:SS]
         let timestamp = if log_line.starts_with('[') && log_line.contains(']') {
             let end = log_line.find(']').unwrap_or(0);
@@ -323,5 +377,39 @@ mod tests {
     fn test_normal_timestamp_extraction() {
         let entry = LogProcessor::process_log_entry("[12:34:56] some log", "");
         assert_eq!(entry.timestamp, "12:34:56");
+    }
+}
+
+#[cfg(test)]
+mod ansi_tests {
+    use super::LogProcessor;
+
+    #[test]
+    fn strips_csi_sequences() {
+        assert_eq!(
+            LogProcessor::strip_ansi("\x1b[32mgreen\x1b[0m plain"),
+            "green plain"
+        );
+    }
+
+    #[test]
+    fn strips_mouse_report_fragments_and_controls() {
+        assert_eq!(
+            LogProcessor::strip_ansi("a\x1b[<5;75;34Mb\rc"),
+            "abc"
+        );
+    }
+
+    #[test]
+    fn strips_osc_titles() {
+        assert_eq!(
+            LogProcessor::strip_ansi("\x1b]0;title\x07visible"),
+            "visible"
+        );
+    }
+
+    #[test]
+    fn keeps_tabs_and_unicode() {
+        assert_eq!(LogProcessor::strip_ansi("a\tb — ✓"), "a\tb — ✓");
     }
 }
